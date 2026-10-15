@@ -132,15 +132,14 @@ def print_misses(
     questions: list[dict[str, Any]],
     ranks: list[int | None],
     top_results: list[dict[str, Any]],
-    k: int = 5,
 ) -> None:
-    """Questions whose expected page was not in the top k - the ones to study."""
+    """Questions whose expected page was not ranked first - the ones to study."""
     misses = [
         (question, rank, top)
         for question, rank, top in zip(questions, ranks, top_results)
-        if rank is None or rank > k
+        if rank != 1
     ]
-    print(f"\nMisses at top-{k} for the current setting "
+    print(f"\nNot ranked first for the current setting "
           f"({CHUNK_SIZE}/{CHUNK_OVERLAP}): {len(misses)} of {len(questions)}")
     for question, rank, top in misses:
         found = f"rank {rank}" if rank else f"not in top {MAX_K}"

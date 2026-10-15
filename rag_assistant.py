@@ -37,7 +37,7 @@ CHROMA_PATH = BASE_DIR / "chroma_db"
 
 CHUNK_SIZE = 100       # words per chunk
 CHUNK_OVERLAP = 20     # words shared between neighbouring chunks
-TOP_K = 12
+TOP_K = 5              # hit@5 = 100% on the eval set (see experiments.md)
 
 EMBEDDING_MODEL = "gemini-embedding-001"
 GENERATION_MODEL = "gemini-3.8-flash"
