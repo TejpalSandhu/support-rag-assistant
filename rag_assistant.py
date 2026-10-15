@@ -1,9 +1,9 @@
 """
 Support assistant: answers questions about product manuals using RAG.
 
-Reads the PDFs in pdfs/, splits them into chunks, embeds them with Gemini
-(cached in embedded_chunks.json), then answers questions in a loop using
-the most similar chunks as context.
+Reads the PDFs in pdfs/, splits them into chunks, stores their Gemini
+embeddings in a local Chroma database (only new chunks get embedded), then
+answers questions in a loop using the most similar chunks as context.
 
 Setup:
     pip install -r requirements.txt
@@ -13,13 +13,14 @@ Run:
     python rag_assistant.py
 """
 
-import json
+import hashlib
 import math
 import os
 import time
 from pathlib import Path
 from typing import Any
 
+import chromadb
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors
@@ -30,9 +31,9 @@ from pypdf import PdfReader
 
 BASE_DIR = Path(__file__).resolve().parent
 PDF_DIR = BASE_DIR / "pdfs"
-# sorted so chunk order (and the cache) stays the same between runs
+# sorted so chunk order stays the same between runs
 PDF_PATHS = sorted(path for path in PDF_DIR.glob("*.pdf") if path.is_file())
-EMBEDDINGS_PATH = BASE_DIR / "embedded_chunks.json"
+CHROMA_PATH = BASE_DIR / "chroma_db"
 
 CHUNK_SIZE = 100       # words per chunk
 CHUNK_OVERLAP = 20     # words shared between neighbouring chunks
@@ -49,10 +50,17 @@ MAX_WAIT_SECONDS = 60
 
 EXIT_COMMANDS = {"quit", "exit", "q"}
 PREVIEW_CHARS = 200    # display only, the model gets full chunks
-CACHE_VERSION = 1      # bump if the cache format changes
 
 
-# --- PDF loading ---
+def make_gemini_client() -> genai.Client:
+    load_dotenv(BASE_DIR / ".env")
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is missing from your .env file")
+    return genai.Client(api_key=api_key)
+
+
+# --- PDF loading and chunking ---
 
 def load_pdf_pages(pdf_path: Path) -> list[dict[str, Any]]:
     """Return [{text, source, page}] for every page that has text."""
@@ -84,8 +92,6 @@ def load_pdf_pages(pdf_path: Path) -> list[dict[str, Any]]:
 
     return page_records
 
-
-# --- Chunking ---
 
 def chunk_text(
     text: str,
@@ -142,6 +148,30 @@ def chunk_documents(
     return document_chunks
 
 
+def load_chunks(
+    chunk_size: int = CHUNK_SIZE,
+    overlap: int = CHUNK_OVERLAP,
+) -> list[dict[str, Any]]:
+    """Read every PDF in PDF_DIR and chunk it with the given settings."""
+    if not PDF_PATHS:
+        raise FileNotFoundError(
+            f"No PDF files found in {PDF_DIR}. Add at least one PDF to this folder."
+        )
+
+    all_pages: list[dict[str, Any]] = []
+    for pdf_path in PDF_PATHS:
+        pages = load_pdf_pages(pdf_path)
+        all_pages.extend(pages)
+        print(f"Loaded {len(pages)} text pages from {pdf_path.name}")
+
+    chunks = chunk_documents(all_pages, chunk_size=chunk_size, overlap=overlap)
+    if not chunks:
+        raise ValueError("No text chunks were created from the PDFs.")
+
+    print("Total chunks across all PDFs:", len(chunks))
+    return chunks
+
+
 # --- Embeddings ---
 
 def embed_with_retry(texts: list[str], client: genai.Client) -> list[list[float]]:
@@ -182,110 +212,96 @@ def embed_with_retry(texts: list[str], client: genai.Client) -> list[list[float]
     raise RuntimeError("Embedding failed after all retries.")
 
 
-def embed_in_batches(texts: list[str], client: genai.Client) -> list[list[float]]:
-    """Embed texts EMBED_BATCH_SIZE at a time (409 chunks -> 5 requests)."""
-    all_vectors: list[list[float]] = []
-
-    for start in range(0, len(texts), EMBED_BATCH_SIZE):
-        batch = texts[start:start + EMBED_BATCH_SIZE]
-        all_vectors.extend(embed_with_retry(batch, client))
-        print(f"  Embedded {len(all_vectors)} of {len(texts)} chunks")
-
-    return all_vectors
-
-
 def get_embedding(text: str, client: genai.Client) -> list[float]:
     return embed_with_retry([text], client)[0]
 
 
-def is_valid_embedding(value: Any) -> bool:
-    """Basic sanity check for cached vectors: non-empty list of finite numbers."""
-    return (
-        isinstance(value, list)
-        and len(value) > 0
-        and all(
-            isinstance(number, (int, float)) and math.isfinite(number)
-            for number in value
-        )
+# --- Vector store (Chroma) ---
+
+def collection_name(chunk_size: int, overlap: int) -> str:
+    # one collection per model + chunk settings so vectors never mix
+    return f"docs_{EMBEDDING_MODEL}_c{chunk_size}_o{overlap}"
+
+
+def get_collection(
+    chunk_size: int = CHUNK_SIZE,
+    overlap: int = CHUNK_OVERLAP,
+) -> chromadb.Collection:
+    chroma_client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+    return chroma_client.get_or_create_collection(
+        name=collection_name(chunk_size, overlap),
+        # cosine: distance = 1 - cosine similarity (fixed at creation)
+        configuration={"hnsw": {"space": "cosine"}},
+        # we pass our own Gemini vectors
+        embedding_function=None,
     )
 
 
-# --- Embedding cache ---
+def make_chunk_ids(chunks: list[dict[str, Any]]) -> list[str]:
+    """IDs like 'manual.pdf-p19-c1-3f2a9b1c' (file, page, chunk no., text hash).
 
-def load_or_create_chunks(
-    documents: list[dict[str, Any]],
+    The hash changes if the text changes, so edited pages get re-embedded.
+    """
+    ids: list[str] = []
+    count_per_page: dict[tuple[str, int], int] = {}
+
+    for chunk in chunks:
+        page_key = (chunk["source"], chunk["page"])
+        count_per_page[page_key] = count_per_page.get(page_key, 0) + 1
+        text_hash = hashlib.sha1(chunk["text"].encode("utf-8")).hexdigest()[:8]
+        ids.append(
+            f"{chunk['source']}-p{chunk['page']}-c{count_per_page[page_key]}-{text_hash}"
+        )
+
+    return ids
+
+
+def sync_collection(
+    collection: chromadb.Collection,
+    chunks: list[dict[str, Any]],
     client: genai.Client,
-) -> list[dict[str, Any]]:
-    """Use the JSON cache if it matches the current chunks, else re-embed."""
-    cache_data: Any = None
+) -> None:
+    """Make the collection match `chunks`, embedding only the missing ones."""
+    ids = make_chunk_ids(chunks)
+    stored_ids = set(collection.get(include=[])["ids"])
 
-    if EMBEDDINGS_PATH.exists():
-        try:
-            with EMBEDDINGS_PATH.open("r", encoding="utf-8") as file:
-                cache_data = json.load(file)
-        except (json.JSONDecodeError, OSError):
-            cache_data = None  # broken cache, rebuild below
+    # left over from an older version of the PDFs
+    stale_ids = stored_ids - set(ids)
+    if stale_ids:
+        collection.delete(ids=list(stale_ids))
+        print(f"Removed {len(stale_ids)} outdated chunks.")
 
-    cached_chunks = None
-    if (
-        isinstance(cache_data, dict)
-        and cache_data.get("cache_version") == CACHE_VERSION
-        and cache_data.get("embedding_model") == EMBEDDING_MODEL
-    ):
-        cached_chunks = cache_data.get("chunks")
+    missing = [
+        (chunk_id, chunk)
+        for chunk_id, chunk in zip(ids, chunks)
+        if chunk_id not in stored_ids
+    ]
+    if not missing:
+        print(f"All {len(chunks)} chunks already stored in '{collection.name}'.")
+        return
 
-    # every cached chunk must match the current chunk exactly
-    cache_is_valid = (
-        isinstance(cached_chunks, list)
-        and len(cached_chunks) == len(documents)
-        and all(
-            isinstance(cached, dict)
-            and cached.get("text") == document["text"]
-            and cached.get("source") == document["source"]
-            and cached.get("page") == document["page"]
-            and is_valid_embedding(cached.get("embedding"))
-            for cached, document in zip(cached_chunks, documents)
+    print(f"Embedding {len(missing)} new chunks into '{collection.name}'...")
+
+    # store each batch right away so a crash doesn't lose finished batches
+    for start in range(0, len(missing), EMBED_BATCH_SIZE):
+        batch = missing[start:start + EMBED_BATCH_SIZE]
+        vectors = embed_with_retry([chunk["text"] for _, chunk in batch], client)
+        collection.upsert(
+            ids=[chunk_id for chunk_id, _ in batch],
+            embeddings=vectors,
+            documents=[chunk["text"] for _, chunk in batch],
+            metadatas=[
+                {"source": chunk["source"], "page": chunk["page"]}
+                for _, chunk in batch
+            ],
         )
-    )
-
-    if cache_is_valid:
-        print("Loaded existing embeddings from disk.")
-        return cached_chunks
-
-    print(f"Embedding {len(documents)} chunks in batches of {EMBED_BATCH_SIZE}...")
-    texts = [document["text"] for document in documents]
-    embeddings = embed_in_batches(texts, client)
-
-    chunks_with_embeddings: list[dict[str, Any]] = []
-
-    # strict=True: fail loudly if the counts ever differ
-    for document, embedding in zip(documents, embeddings, strict=True):
-        chunks_with_embeddings.append(
-            {
-                "text": document["text"],
-                "source": document["source"],
-                "page": document["page"],
-                "embedding": embedding,
-            }
-        )
-
-    cache_data = {
-        "cache_version": CACHE_VERSION,
-        "embedding_model": EMBEDDING_MODEL,
-        "chunks": chunks_with_embeddings,
-    }
-
-    with EMBEDDINGS_PATH.open("w", encoding="utf-8") as file:
-        json.dump(cache_data, file, ensure_ascii=False, indent=2)
-
-    print("Generated and saved new embeddings.")
-    return chunks_with_embeddings
+        print(f"  Stored {start + len(batch)} of {len(missing)}")
 
 
 # --- Retrieval ---
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """dot(a, b) / (|a| * |b|). Higher = more similar; a ranking score, not a %."""
+    """dot(a, b) / (|a| * |b|). Search uses Chroma now; see verify_chroma.py."""
     if len(a) != len(b):
         raise ValueError("Vectors must have the same length")
 
@@ -297,6 +313,36 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
         raise ValueError("Vectors must not be zero vectors")
 
     return dot_product / (magnitude_a * magnitude_b)
+
+
+def retrieve(
+    question: str,
+    collection: chromadb.Collection,
+    client: genai.Client,
+    top_k: int = TOP_K,
+) -> list[dict[str, Any]]:
+    """Top-k chunks for a question, best first, with a similarity score."""
+    query_embedding = get_embedding(question, client)
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=top_k,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    # one inner list per query; we sent one query
+    return [
+        {
+            "text": text,
+            "source": metadata["source"],
+            "page": metadata["page"],
+            "score": 1 - distance,
+        }
+        for text, metadata, distance in zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+        )
+    ]
 
 
 def build_rag_prompt(
@@ -328,27 +374,11 @@ Answer:"""
 
 def answer_question(
     question: str,
-    chunks: list[dict[str, Any]],
+    collection: chromadb.Collection,
     client: genai.Client,
 ) -> None:
     """Retrieve the top chunks for one question, ask Gemini, print the result."""
-    query_embedding = get_embedding(question, client)
-
-    scored_chunks: list[dict[str, Any]] = []
-
-    for chunk in chunks:
-        score = cosine_similarity(query_embedding, chunk["embedding"])
-        scored_chunks.append(
-            {
-                "text": chunk["text"],
-                "source": chunk["source"],
-                "page": chunk["page"],
-                "score": score,
-            }
-        )
-
-    scored_chunks.sort(key=lambda item: item["score"], reverse=True)
-    top_chunks = scored_chunks[:TOP_K]
+    top_chunks = retrieve(question, collection, client)
 
     prompt = build_rag_prompt(question, top_chunks)
     response = client.interactions.create(
@@ -372,36 +402,11 @@ def answer_question(
 # --- Main ---
 
 def main() -> None:
-    if not PDF_PATHS:
-        raise FileNotFoundError(
-            f"No PDF files found in {PDF_DIR}. Add at least one PDF to this folder."
-        )
+    client = make_gemini_client()
+    chunks = load_chunks()
 
-    load_dotenv(BASE_DIR / ".env")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is missing from your .env file")
-
-    client = genai.Client(api_key=api_key)
-
-    all_pages: list[dict[str, Any]] = []
-    for pdf_path in PDF_PATHS:
-        pages = load_pdf_pages(pdf_path)
-        all_pages.extend(pages)
-        print(f"Loaded {len(pages)} text pages from {pdf_path.name}")
-
-    text_chunks = chunk_documents(
-        all_pages,
-        chunk_size=CHUNK_SIZE,
-        overlap=CHUNK_OVERLAP,
-    )
-    if not text_chunks:
-        raise ValueError("No text chunks were created from the PDFs.")
-
-    print("Total chunks across all PDFs:", len(text_chunks))
-
-    # setup above runs once; only the loop below repeats per question
-    chunks = load_or_create_chunks(text_chunks, client)
+    collection = get_collection()
+    sync_collection(collection, chunks, client)
 
     print("\nReady! Ask a question about the documents. Type 'quit' to stop.")
 
@@ -418,7 +423,7 @@ def main() -> None:
             break
 
         try:
-            answer_question(question, chunks, client)
+            answer_question(question, collection, client)
         except errors.APIError as error:
             # don't end the session because one request failed
             print(f"\nSorry, the Gemini API returned an error: {error}")

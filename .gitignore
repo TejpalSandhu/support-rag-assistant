@@ -5,5 +5,6 @@ __pycache__/
 chroma_db/
 embedded_chunks.json
 *.pdf
+study/
 .vscode/
 Thumbs.db
