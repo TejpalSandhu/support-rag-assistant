@@ -1,0 +1,9 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+chroma_db/
+embedded_chunks.json
+*.pdf
+.vscode/
+Thumbs.db
