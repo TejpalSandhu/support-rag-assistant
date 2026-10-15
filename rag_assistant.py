@@ -148,11 +148,8 @@ def chunk_documents(
     return document_chunks
 
 
-def load_chunks(
-    chunk_size: int = CHUNK_SIZE,
-    overlap: int = CHUNK_OVERLAP,
-) -> list[dict[str, Any]]:
-    """Read every PDF in PDF_DIR and chunk it with the given settings."""
+def load_pages() -> list[dict[str, Any]]:
+    """Read every PDF in PDF_DIR (slow - pypdf takes over a minute here)."""
     if not PDF_PATHS:
         raise FileNotFoundError(
             f"No PDF files found in {PDF_DIR}. Add at least one PDF to this folder."
@@ -164,7 +161,15 @@ def load_chunks(
         all_pages.extend(pages)
         print(f"Loaded {len(pages)} text pages from {pdf_path.name}")
 
-    chunks = chunk_documents(all_pages, chunk_size=chunk_size, overlap=overlap)
+    return all_pages
+
+
+def load_chunks(
+    chunk_size: int = CHUNK_SIZE,
+    overlap: int = CHUNK_OVERLAP,
+) -> list[dict[str, Any]]:
+    """Read every PDF and chunk it with the given settings."""
+    chunks = chunk_documents(load_pages(), chunk_size=chunk_size, overlap=overlap)
     if not chunks:
         raise ValueError("No text chunks were created from the PDFs.")
 
@@ -173,6 +178,21 @@ def load_chunks(
 
 
 # --- Embeddings ---
+
+class DailyQuotaError(RuntimeError):
+    """The free tier's daily limit is used up - waiting minutes won't help."""
+
+
+def server_retry_delay(error: errors.APIError) -> float | None:
+    """Seconds Google asked us to wait (the RetryInfo in its 429 reply), if any."""
+    try:
+        for item in error.details["error"]["details"]:
+            if item.get("@type", "").endswith("RetryInfo"):
+                return float(item["retryDelay"].rstrip("s"))
+    except (KeyError, TypeError, AttributeError, ValueError):
+        pass
+    return None
+
 
 def embed_with_retry(texts: list[str], client: genai.Client) -> list[list[float]]:
     """Embed a list of texts in one request, retrying on rate limits."""
@@ -190,7 +210,15 @@ def embed_with_retry(texts: list[str], client: genai.Client) -> list[list[float]
             if not is_temporary or attempt == MAX_RETRIES:
                 raise
 
-            wait_seconds = min(
+            # a wait of hours means the daily quota, not the per-minute one
+            server_wait = server_retry_delay(error)
+            if server_wait is not None and server_wait > MAX_WAIT_SECONDS:
+                raise DailyQuotaError(
+                    "Daily embedding quota used up. Google says to retry in "
+                    f"{server_wait / 3600:.1f} hours. Everything stored so far is kept."
+                ) from error
+
+            wait_seconds = server_wait or min(
                 INITIAL_WAIT_SECONDS * 2 ** (attempt - 1),
                 MAX_WAIT_SECONDS,
             )
@@ -223,18 +251,22 @@ def collection_name(chunk_size: int, overlap: int) -> str:
     return f"docs_{EMBEDDING_MODEL}_c{chunk_size}_o{overlap}"
 
 
-def get_collection(
-    chunk_size: int = CHUNK_SIZE,
-    overlap: int = CHUNK_OVERLAP,
-) -> chromadb.Collection:
+def open_collection(name: str) -> chromadb.Collection:
     chroma_client = chromadb.PersistentClient(path=str(CHROMA_PATH))
     return chroma_client.get_or_create_collection(
-        name=collection_name(chunk_size, overlap),
+        name=name,
         # cosine: distance = 1 - cosine similarity (fixed at creation)
         configuration={"hnsw": {"space": "cosine"}},
         # we pass our own Gemini vectors
         embedding_function=None,
     )
+
+
+def get_collection(
+    chunk_size: int = CHUNK_SIZE,
+    overlap: int = CHUNK_OVERLAP,
+) -> chromadb.Collection:
+    return open_collection(collection_name(chunk_size, overlap))
 
 
 def make_chunk_ids(chunks: list[dict[str, Any]]) -> list[str]:
@@ -322,7 +354,15 @@ def retrieve(
     top_k: int = TOP_K,
 ) -> list[dict[str, Any]]:
     """Top-k chunks for a question, best first, with a similarity score."""
-    query_embedding = get_embedding(question, client)
+    return search(collection, get_embedding(question, client), top_k)
+
+
+def search(
+    collection: chromadb.Collection,
+    query_embedding: list[float],
+    top_k: int = TOP_K,
+) -> list[dict[str, Any]]:
+    """Like retrieve(), but for a question that is already embedded."""
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
@@ -406,7 +446,11 @@ def main() -> None:
     chunks = load_chunks()
 
     collection = get_collection()
-    sync_collection(collection, chunks, client)
+    try:
+        sync_collection(collection, chunks, client)
+    except DailyQuotaError as error:
+        print(f"\n{error}")
+        return
 
     print("\nReady! Ask a question about the documents. Type 'quit' to stop.")
 
@@ -424,7 +468,7 @@ def main() -> None:
 
         try:
             answer_question(question, collection, client)
-        except errors.APIError as error:
+        except (errors.APIError, DailyQuotaError) as error:
             # don't end the session because one request failed
             print(f"\nSorry, the Gemini API returned an error: {error}")
 

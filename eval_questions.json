@@ -1,0 +1,43 @@
+{
+  "answerable": [
+    {"id": "mini-warranty", "question": "How long is the warranty on the MINI+ if I bought it for home use?", "source": "prusa3d_manual_mini_en.pdf", "pages": [7]},
+    {"id": "mini-usb", "question": "My MINI+ won't read my USB stick. What can I do?", "source": "prusa3d_manual_mini_en.pdf", "pages": [53]},
+    {"id": "mini-firmware-update", "question": "How do I update the firmware on my MINI+?", "source": "prusa3d_manual_mini_en.pdf", "pages": [16]},
+    {"id": "mini-firmware-downgrade", "question": "How can I go back to an older firmware version on the MINI?", "source": "prusa3d_manual_mini_en.pdf", "pages": [16, 54]},
+    {"id": "mini-pla-temps", "question": "What nozzle and bed temperature should I use for PLA on the MINI+?", "source": "prusa3d_manual_mini_en.pdf", "pages": [36]},
+    {"id": "mini-textured-acetone", "question": "Can I clean the MINI's textured print sheet with acetone?", "source": "prusa3d_manual_mini_en.pdf", "pages": [9, 41, 42]},
+    {"id": "mini-unload", "question": "How do I take the filament out of my MINI+?", "source": "prusa3d_manual_mini_en.pdf", "pages": [19]},
+    {"id": "mini-clogged-nozzle", "question": "Nothing comes out of my MINI's nozzle, I think it's clogged. How do I fix it?", "source": "prusa3d_manual_mini_en.pdf", "pages": [47, 48]},
+    {"id": "mini-network", "question": "How do I connect my MINI+ to my home network?", "source": "prusa3d_manual_mini_en.pdf", "pages": [25, 26]},
+    {"id": "mini-runout", "question": "What happens if my MINI+ runs out of filament in the middle of a print?", "source": "prusa3d_manual_mini_en.pdf", "pages": [51, 52]},
+    {"id": "mini-mbl-fails", "question": "Mesh bed leveling keeps failing on my MINI+. What could cause that?", "source": "prusa3d_manual_mini_en.pdf", "pages": [52]},
+    {"id": "mini-sheet-profiles", "question": "I switch between two print sheets on my MINI. Can it remember the Live Z value for each one?", "source": "prusa3d_manual_mini_en.pdf", "pages": [43, 44]},
+    {"id": "mini-gear-lube", "question": "Do I need to oil the extruder gears on the MINI+?", "source": "prusa3d_manual_mini_en.pdf", "pages": [44]},
+    {"id": "mini-box-contents", "question": "What tools come in the box with the MINI+?", "source": "prusa3d_manual_mini_en.pdf", "pages": [12]},
+    {"id": "mini-unplug", "question": "How do I safely unplug the power cable from my MINI+?", "source": "prusa3d_manual_mini_en.pdf", "pages": [8, 13]},
+
+    {"id": "xl-nozzle-size", "question": "What size nozzle is installed on the Prusa XL out of the box?", "source": "prusa3d_manual_xl_en.pdf", "pages": [7, 14, 27, 40]},
+    {"id": "xl-wifi", "question": "How do I connect my Prusa XL to Wi-Fi?", "source": "prusa3d_manual_xl_en.pdf", "pages": [29]},
+    {"id": "xl-volume", "question": "How big can prints be on the Prusa XL?", "source": "prusa3d_manual_xl_en.pdf", "pages": [38]},
+    {"id": "xl-factory-reset", "question": "How do I reset my XL to factory settings?", "source": "prusa3d_manual_xl_en.pdf", "pages": [27]},
+    {"id": "xl-first-layer-peeling", "question": "The first layer keeps peeling off the bed on my XL. What should I do?", "source": "prusa3d_manual_xl_en.pdf", "pages": [23, 25]},
+    {"id": "xl-fuse", "question": "Which fuse does the Prusa XL use and how do I replace it?", "source": "prusa3d_manual_xl_en.pdf", "pages": [10]},
+    {"id": "xl-rails", "question": "Should I grease the linear rails on my XL?", "source": "prusa3d_manual_xl_en.pdf", "pages": [51]},
+    {"id": "xl-two-sensors", "question": "Why does the Prusa XL have two filament sensors?", "source": "prusa3d_manual_xl_en.pdf", "pages": [53]},
+    {"id": "xl-warranty-world", "question": "How long is the XL warranty for a customer outside the EU?", "source": "prusa3d_manual_xl_en.pdf", "pages": [8]},
+    {"id": "xl-moving", "question": "What is the right way to lift and move the Prusa XL?", "source": "prusa3d_manual_xl_en.pdf", "pages": [15]},
+    {"id": "xl-pa-drying", "question": "How should I dry PA11CF filament before printing it on the XL?", "source": "prusa3d_manual_xl_en.pdf", "pages": [47]},
+    {"id": "xl-selftest-filament", "question": "How much filament do I need for the XL's selftest?", "source": "prusa3d_manual_xl_en.pdf", "pages": [20]},
+    {"id": "xl-unofficial-firmware", "question": "What happens to my warranty if I flash unofficial firmware on the XL?", "source": "prusa3d_manual_xl_en.pdf", "pages": [54]}
+  ],
+  "unanswerable": [
+    {"id": "tesla-warranty", "question": "What is the warranty on a Tesla?", "kind": "near-miss"},
+    {"id": "refund", "question": "How do I return my printer and get a refund?", "kind": "near-miss"},
+    {"id": "xl-price", "question": "How much does the Prusa XL cost in the US?", "kind": "near-miss"},
+    {"id": "shipping-canada", "question": "How long does shipping to Canada take?", "kind": "near-miss"},
+    {"id": "xl-resin", "question": "Can the Prusa XL print with resin?", "kind": "near-miss"},
+    {"id": "cat-food", "question": "What should I feed a cat?", "kind": "off-topic"},
+    {"id": "sourdough", "question": "How do I bake sourdough bread?", "kind": "off-topic"},
+    {"id": "world-cup", "question": "Who won the 2022 football World Cup?", "kind": "off-topic"}
+  ]
+}
