@@ -4,10 +4,13 @@ Support assistant: answers questions about product manuals using RAG.
 Reads the PDFs in pdfs/, splits them into chunks, stores their Gemini
 embeddings in a local Chroma database (only new chunks get embedded), then
 answers questions in a loop using the most similar chunks as context.
+If even the best match is weak, it says the docs don't cover the question
+instead of calling the model. Every question is traced in Langfuse when
+LANGFUSE_* keys are set.
 
 Setup:
     pip install -r requirements.txt
-    put GEMINI_API_KEY=... in .env
+    copy .env.example to .env and fill in the keys
     put PDFs in pdfs/
 Run:
     python rag_assistant.py
@@ -17,6 +20,7 @@ import hashlib
 import math
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +28,7 @@ import chromadb
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors
+from langfuse import Langfuse, get_client, propagate_attributes
 from pypdf import PdfReader
 
 
@@ -38,6 +43,13 @@ CHROMA_PATH = BASE_DIR / "chroma_db"
 CHUNK_SIZE = 100       # words per chunk
 CHUNK_OVERLAP = 20     # words shared between neighbouring chunks
 TOP_K = 5              # hit@5 = 100% on the eval set (see experiments.md)
+# best-match score below which the docs don't cover the question; the model
+# isn't called. Chosen with choose_threshold.py for the 100/20 setting.
+MIN_SCORE = 0.631
+NOT_COVERED_MESSAGE = (
+    "Sorry, I couldn't find anything about that in the product manuals, "
+    "so I won't guess. Try rephrasing your question, or contact support."
+)
 
 EMBEDDING_MODEL = "gemini-embedding-001"
 GENERATION_MODEL = "gemini-3.8-flash"
@@ -45,6 +57,7 @@ GENERATION_MODEL = "gemini-3.8-flash"
 EMBED_BATCH_SIZE = 100
 # retry on 429 / 5xx with doubling waits: 5, 10, 20, 40, 60s
 MAX_RETRIES = 6
+GENERATION_RETRIES = 3   # someone is waiting for the answer: 5s + 10s at most
 INITIAL_WAIT_SECONDS = 5
 MAX_WAIT_SECONDS = 60
 
@@ -58,6 +71,19 @@ def make_gemini_client() -> genai.Client:
     if not api_key:
         raise ValueError("GEMINI_API_KEY is missing from your .env file")
     return genai.Client(api_key=api_key)
+
+
+def tracing_configured() -> bool:
+    load_dotenv(BASE_DIR / ".env")
+    return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
+
+
+def make_langfuse() -> Langfuse:
+    """Langfuse client from the LANGFUSE_* keys in .env, or a disabled one."""
+    if tracing_configured():
+        return get_client()
+    # no keys: same API, but nothing is sent anywhere
+    return Langfuse(public_key="disabled", secret_key="disabled", tracing_enabled=False)
 
 
 # --- PDF loading and chunking ---
@@ -412,20 +438,109 @@ Question:
 Answer:"""
 
 
+def error_status(error: Exception) -> int:
+    """HTTP status of an SDK error (embedding errors use .code, interactions .status_code)."""
+    for attribute in ("code", "status_code"):
+        value = getattr(error, attribute, None)
+        if isinstance(value, int):
+            return value
+    return 0
+
+
+def generate_with_retry(prompt: str, client: genai.Client) -> Any:
+    """Ask the generation model, retrying while it's overloaded (429 / 5xx)."""
+    for attempt in range(1, GENERATION_RETRIES + 1):
+        try:
+            return client.interactions.create(model=GENERATION_MODEL, input=prompt)
+        except Exception as error:
+            status = error_status(error)
+            if not (status == 429 or status >= 500) or attempt == GENERATION_RETRIES:
+                raise
+            wait_seconds = INITIAL_WAIT_SECONDS * 2 ** (attempt - 1)
+            print(f"  Gemini returned error {status}. Waiting {wait_seconds}s and retrying...")
+            time.sleep(wait_seconds)
+
+    raise RuntimeError("Generation failed after all retries.")
+
+
+def usage_details(response: Any) -> dict[str, int] | None:
+    """Token counts from a Gemini response, in the shape Langfuse expects."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    details = {
+        "input": usage.total_input_tokens,
+        "output": usage.total_output_tokens,
+        "total": usage.total_tokens,
+    }
+    return {key: value for key, value in details.items() if value is not None}
+
+
 def answer_question(
     question: str,
     collection: chromadb.Collection,
     client: genai.Client,
-) -> None:
-    """Retrieve the top chunks for one question, ask Gemini, print the result."""
-    top_chunks = retrieve(question, collection, client)
+    langfuse: Langfuse,
+) -> dict[str, Any]:
+    """Answer one question, tracing each step in Langfuse.
 
-    prompt = build_rag_prompt(question, top_chunks)
-    response = client.interactions.create(
-        model=GENERATION_MODEL,
-        input=prompt,
-    )
-    answer = response.output_text
+    Trace: support-question > embed-question > vector-search >
+    relevance-check > answer (skipped when the best score < MIN_SCORE).
+    """
+    with langfuse.start_as_current_observation(
+        name="support-question", as_type="span", input=question
+    ) as root:
+        with langfuse.start_as_current_observation(
+            name="embed-question", as_type="embedding",
+            model=EMBEDDING_MODEL, input=question,
+        ) as step:
+            query_embedding = get_embedding(question, client)
+            step.update(output={"dimensions": len(query_embedding)})
+
+        with langfuse.start_as_current_observation(
+            name="vector-search", as_type="retriever", input=question,
+            metadata={"collection": collection.name, "top_k": TOP_K},
+        ) as step:
+            top_chunks = search(collection, query_embedding)
+            step.update(output=[
+                {
+                    "source": chunk["source"],
+                    "page": chunk["page"],
+                    "score": round(chunk["score"], 4),
+                    "text": chunk["text"],
+                }
+                for chunk in top_chunks
+            ])
+
+        best_score = top_chunks[0]["score"] if top_chunks else 0.0
+        with langfuse.start_as_current_observation(
+            name="relevance-check", as_type="guardrail",
+            input={"best_score": round(best_score, 4), "min_score": MIN_SCORE},
+        ) as step:
+            covered = best_score >= MIN_SCORE
+            step.update(output={"covered": covered})
+
+        if covered:
+            prompt = build_rag_prompt(question, top_chunks)
+            with langfuse.start_as_current_observation(
+                name="answer", as_type="generation",
+                model=GENERATION_MODEL, input=prompt,
+            ) as step:
+                response = generate_with_retry(prompt, client)
+                answer = response.output_text
+                step.update(output=answer, usage_details=usage_details(response))
+        else:
+            answer = NOT_COVERED_MESSAGE
+
+        root.update(
+            output=answer,
+            metadata={"covered": covered, "best_score": round(best_score, 4)},
+        )
+        try:
+            trace_url = langfuse.get_trace_url()
+        except Exception:
+            # the link needs a call to Langfuse; never fail an answer over it
+            trace_url = None
 
     print("\nRetrieved chunks:")
     for chunk in top_chunks:
@@ -435,14 +550,21 @@ def answer_question(
             f"  Text: {chunk['text'][:PREVIEW_CHARS]}..."
         )
 
+    if not covered:
+        print(f"\nBest score {best_score:.3f} is below {MIN_SCORE} - model not called.")
     print("\nAI Answer:")
     print(answer)
+    if trace_url:
+        print(f"\nTrace: {trace_url}")
+
+    return {"answer": answer, "covered": covered, "best_score": best_score, "chunks": top_chunks}
 
 
 # --- Main ---
 
 def main() -> None:
     client = make_gemini_client()
+    langfuse = make_langfuse()
     chunks = load_chunks()
 
     collection = get_collection()
@@ -452,25 +574,34 @@ def main() -> None:
         print(f"\n{error}")
         return
 
-    print("\nReady! Ask a question about the documents. Type 'quit' to stop.")
+    tracing = "on" if tracing_configured() else "off (no LANGFUSE_* keys in .env)"
+    print(f"\nLangfuse tracing: {tracing}")
+    print("Ready! Ask a question about the documents. Type 'quit' to stop.")
 
-    while True:
-        try:
-            question = input("\nYour question: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            break
+    # every question in this run shares one session id in Langfuse
+    session_id = f"chat-{uuid.uuid4().hex[:8]}"
+    try:
+        with propagate_attributes(session_id=session_id, tags=["support-assistant"]):
+            while True:
+                try:
+                    question = input("\nYour question: ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print()
+                    break
 
-        if not question:
-            continue
-        if question.lower() in EXIT_COMMANDS:
-            break
+                if not question:
+                    continue
+                if question.lower() in EXIT_COMMANDS:
+                    break
 
-        try:
-            answer_question(question, collection, client)
-        except (errors.APIError, DailyQuotaError) as error:
-            # don't end the session because one request failed
-            print(f"\nSorry, the Gemini API returned an error: {error}")
+                try:
+                    answer_question(question, collection, client, langfuse)
+                except Exception as error:
+                    # don't end the session because one question failed
+                    print(f"\nSorry, that question failed ({type(error).__name__}): {error}")
+    finally:
+        # send any traces still buffered before the program exits
+        langfuse.flush()
 
     print("Goodbye!")
 

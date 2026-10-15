@@ -1,4 +1,6 @@
-pypdf
-python-dotenv
-google-genai
-chromadb
+# Tested with Python 3.12 and these exact versions (these SDKs change often)
+pypdf==6.20.1
+python-dotenv==1.2.4
+google-genai==2.31.0
+chromadb==1.5.9
+langfuse==5.0.1
