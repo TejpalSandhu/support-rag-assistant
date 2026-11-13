@@ -37,13 +37,16 @@ class FakeGenerator:
 
     def __init__(self):
         self.calls = 0
+        self.models = []  # which model each call asked
         self.timeout_ms = None
         self.error = None  # set to an exception to simulate a failing model
+        self.failing_models = None  # None = every model fails when error is set
 
     def __call__(self, model, contents, config=None):
         self.calls += 1
+        self.models.append(model)
         self.timeout_ms = config.http_options.timeout if config else None
-        if self.error:
+        if self.error and (self.failing_models is None or model in self.failing_models):
             raise self.error
         usage = SimpleNamespace(prompt_token_count=100, candidates_token_count=10, total_token_count=110)
         return SimpleNamespace(text=FAKE_ANSWER, usage_metadata=usage)

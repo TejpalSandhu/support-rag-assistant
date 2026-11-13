@@ -47,7 +47,7 @@ foreach ($name in $secretNames.Keys) {
 }
 
 # settings that aren't secret
-foreach ($name in "LANGFUSE_BASE_URL", "GENERATION_MODEL", "MIN_SCORE") {
+foreach ($name in "LANGFUSE_BASE_URL", "GENERATION_MODEL", "FALLBACK_MODEL", "MIN_SCORE") {
     if ($values[$name]) { $envVars += "$name=$($values[$name])" }
 }
 # live traces are tagged "production", so local tests don't mix into the metrics page

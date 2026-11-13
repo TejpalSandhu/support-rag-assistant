@@ -70,6 +70,9 @@ NOT_COVERED_MESSAGE = (
 EMBEDDING_MODEL = "gemini-embedding-001"
 # changeable without code edits, e.g. when a model is overloaded
 GENERATION_MODEL = os.getenv("GENERATION_MODEL") or "gemini-3.8-flash"
+# asked when the main model is busy, over its daily limit or too slow; it has
+# its own free-tier limit. Set FALLBACK_MODEL=none to turn this off.
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL") or "gemini-flash-lite-latest"
 
 EMBED_BATCH_SIZE = 100
 # retry on 429 / 5xx with doubling waits: 5, 10, 20, 40, 60s
@@ -619,29 +622,38 @@ def is_timeout(error: Exception) -> bool:
     return isinstance(error, TimeoutError) or "Timeout" in type(error).__name__
 
 
-def generate(prompt: str, client: genai.Client) -> Any:
-    """Ask the generation model, with one retry for temporary server errors.
+def answer_models() -> list[str]:
+    models = [GENERATION_MODEL]
+    if FALLBACK_MODEL not in ("none", GENERATION_MODEL):
+        models.append(FALLBACK_MODEL)
+    return models
+
+
+def generate(prompt: str, client: genai.Client) -> tuple[Any, str]:
+    """Ask the answer model; returns (response, model that answered).
+
+    If the main model is busy (5xx), over its limit (429) or too slow, the
+    fallback model is asked straight away: retrying an overloaded model a few
+    seconds later rarely helps, and the fallback has its own daily limit.
 
     Uses generate_content rather than the interactions API: interactions has
     hidden SDK retries that sleep for whatever Retry-After the server sends
-    (hours for a daily limit). Rate limits (429) and timeouts are not
-    retried here - waiting a few seconds wouldn't fix either.
+    (hours for a daily limit).
     """
     config = types.GenerateContentConfig(
         http_options=types.HttpOptions(timeout=GENERATION_TIMEOUT_SECONDS * 1000),
     )
-    for attempt in (1, 2):
+    models = answer_models()
+    for model in models:
         try:
-            return client.models.generate_content(
-                model=GENERATION_MODEL,
-                contents=prompt,
-                config=config,
-            )
+            response = client.models.generate_content(model=model, contents=prompt, config=config)
+            return response, model
         except Exception as error:
-            if error_status(error) < 500 or attempt == 2:
+            code = error_status(error)
+            worth_switching = code == 429 or code >= 500 or is_timeout(error)
+            if not worth_switching or model == models[-1]:
                 raise
-            print(f"  Gemini returned error {error_status(error)}. Retrying once in 2s...")
-            time.sleep(2)
+            print(f"  {model} failed ({code or 'timeout'}). Asking {models[-1]} instead...")
 
 
 def usage_details(response: Any) -> dict[str, int] | None:
@@ -709,10 +721,11 @@ def ask(
                 name="answer", as_type="generation",
                 model=GENERATION_MODEL, input=prompt,
             ) as step:
-                response = generate(prompt, client)
+                response, model = generate(prompt, client)
                 # text is empty if the model returned nothing (e.g. blocked)
                 answer = response.text or "Sorry, no answer was generated. Please try again."
-                step.update(output=answer, usage_details=usage_details(response))
+                # record which model really answered (the fallback, if the main one failed)
+                step.update(output=answer, model=model, usage_details=usage_details(response))
         else:
             answer = NOT_COVERED_MESSAGE
 

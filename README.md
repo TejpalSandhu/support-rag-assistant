@@ -203,7 +203,9 @@ are free, fast, and never touch your API quota.
 
 On the Gemini free tier, every embedded text counts toward a limit of
 roughly 100 per minute and 1,000 per day, and answers are limited to about
-20 per day per model (switch with `GENERATION_MODEL` in `.env`). The code waits out per-minute limits
+20 per day per model. If the answer model is busy, over its limit or too slow,
+the app asks `FALLBACK_MODEL` (default `gemini-flash-lite-latest`) instead,
+which has its own daily limit. The code waits out per-minute limits
 using Google's own retry delay, stops cleanly when the daily limit is
 reached, and resumes where it left off on the next run.
 

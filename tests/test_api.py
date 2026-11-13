@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import chromadb
+import pytest
 from fastapi.testclient import TestClient
 
 import api
@@ -201,8 +202,40 @@ def test_busy_model_returns_503(client, fake_gemini, make_pdf):
 
     response = client.post("/api/ask", json={"question": "How do I push the filament into the extruder?"})
     assert response.status_code == 503
-    # one quick retry for a temporary server error, then give up
-    assert fake_gemini.generator.calls == 2
+    # the main model, then the fallback once; both busy, so give up
+    assert fake_gemini.generator.models == [rag.GENERATION_MODEL, rag.FALLBACK_MODEL]
+
+
+def test_fallback_model_answers_when_the_main_one_is_busy(client, fake_gemini, make_pdf):
+    upload(client, "manual.pdf", make_pdf([FILAMENT_PAGE]))
+    fake_gemini.generator.error = type("Busy", (Exception,), {"status_code": 503})()
+    fake_gemini.generator.failing_models = {rag.GENERATION_MODEL}
+
+    response = client.post("/api/ask", json={"question": "How do I push the filament into the extruder?"})
+    assert response.status_code == 200
+    assert response.json()["answer"] == FAKE_ANSWER
+    assert fake_gemini.generator.models == [rag.GENERATION_MODEL, rag.FALLBACK_MODEL]
+
+
+def test_no_fallback_for_errors_that_switching_cannot_fix(client, fake_gemini, make_pdf):
+    upload(client, "manual.pdf", make_pdf([FILAMENT_PAGE]))
+    # e.g. 400 bad request: the fallback would fail the same way
+    BadRequest = type("BadRequest", (Exception,), {"status_code": 400})
+    fake_gemini.generator.error = BadRequest()
+
+    # an unexpected error is raised (a 500 for real users; TestClient re-raises it)
+    with pytest.raises(BadRequest):
+        client.post("/api/ask", json={"question": "How do I push the filament into the extruder?"})
+    assert fake_gemini.generator.models == [rag.GENERATION_MODEL]
+
+
+def test_fallback_can_be_turned_off(client, fake_gemini, make_pdf, monkeypatch):
+    monkeypatch.setattr(rag, "FALLBACK_MODEL", "none")
+    upload(client, "manual.pdf", make_pdf([FILAMENT_PAGE]))
+    fake_gemini.generator.error = type("Busy", (Exception,), {"status_code": 503})()
+
+    assert client.post("/api/ask", json={"question": "How do I push the filament into the extruder?"}).status_code == 503
+    assert fake_gemini.generator.models == [rag.GENERATION_MODEL]
 
 
 def test_model_rate_limit_returns_429(client, fake_gemini, make_pdf):
@@ -211,8 +244,9 @@ def test_model_rate_limit_returns_429(client, fake_gemini, make_pdf):
 
     response = client.post("/api/ask", json={"question": "How do I push the filament into the extruder?"})
     assert response.status_code == 429
-    assert "usage limit" in response.json()["detail"]
-    assert fake_gemini.generator.calls == 1  # waiting wouldn't help, so no retry
+    assert "usage limits" in response.json()["detail"]
+    # the fallback has its own daily limit, so it's worth asking
+    assert fake_gemini.generator.calls == 2
 
 
 def test_model_timeout_returns_503(client, fake_gemini, make_pdf):
@@ -221,5 +255,5 @@ def test_model_timeout_returns_503(client, fake_gemini, make_pdf):
 
     response = client.post("/api/ask", json={"question": "How do I push the filament into the extruder?"})
     assert response.status_code == 503
-    assert fake_gemini.generator.calls == 1  # already waited the full limit
+    assert fake_gemini.generator.calls == 2  # main model, then the fallback
     assert fake_gemini.generator.timeout_ms == rag.GENERATION_TIMEOUT_SECONDS * 1000

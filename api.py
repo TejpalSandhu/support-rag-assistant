@@ -252,13 +252,13 @@ def ask(body: AskRequest, services: ServicesDep) -> AskResponse:
         if code == 429:
             raise HTTPException(
                 status.HTTP_429_TOO_MANY_REQUESTS,
-                "The AI model's usage limit was reached. Try again later "
+                "The AI models' usage limits were reached. Try again later "
                 "(free-tier limits reset daily) or set GENERATION_MODEL to another model.",
             )
         if code >= 500 or rag.is_timeout(error):
             raise HTTPException(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
-                "The AI model is busy right now. Please try again in a minute.",
+                "The AI models are busy right now. Please try again in a minute.",
             )
         raise
 
