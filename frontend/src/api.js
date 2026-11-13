@@ -69,4 +69,13 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question }),
     }),
+
+  sendFeedback: (traceId, helpful) =>
+    request('/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trace_id: traceId, helpful }),
+    }),
+
+  getMetrics: (days) => request(`/metrics?days=${days}`),
 }

@@ -1,0 +1,128 @@
+import { useEffect, useState } from 'react'
+import { api } from '../api'
+
+const RANGES = [
+  { days: 1, label: '24 hours' },
+  { days: 7, label: '7 days' },
+  { days: 30, label: '30 days' },
+]
+
+function percent(part, whole) {
+  return whole ? `${Math.round((part / whole) * 100)}% of questions` : '—'
+}
+
+function Stat({ label, value, detail }) {
+  return (
+    <div className="stat card">
+      <div className="stat-label">{label}</div>
+      <div className="stat-value">{value}</div>
+      {detail && <div className="stat-detail muted small">{detail}</div>}
+    </div>
+  )
+}
+
+export default function MetricsPage({ onApiError }) {
+  const [days, setDays] = useState(7)
+  const [reloads, setReloads] = useState(0)
+  const [data, setData] = useState(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  // fetch whenever the range changes or Refresh is clicked
+  useEffect(() => {
+    let current = true // ignore a slow reply after the range changed again
+    api
+      .getMetrics(days)
+      .then((result) => {
+        if (current) {
+          setData(result)
+          setError('')
+        }
+      })
+      .catch((err) => {
+        if (current && !onApiError(err)) setError(err.message)
+      })
+      .finally(() => {
+        if (current) setLoading(false)
+      })
+    return () => {
+      current = false
+    }
+  }, [days, reloads, onApiError])
+
+  function reload(newDays = days) {
+    setLoading(true)
+    setDays(newDays)
+    setReloads((count) => count + 1)
+  }
+
+  return (
+    <main className="panel metrics-page">
+      <div className="metrics-header">
+        <div>
+          <h2>Metrics</h2>
+          <p className="muted small">
+            From the Langfuse traces of this site
+            {data && ` (environment "${data.environment}")`}. New questions show up within a
+            minute.
+          </p>
+        </div>
+        <div className="metrics-controls">
+          <div className="range" role="group" aria-label="Time range">
+            {RANGES.map((range) => (
+              <button
+                key={range.days}
+                type="button"
+                className={`tab ${days === range.days ? 'active' : ''}`}
+                aria-pressed={days === range.days}
+                onClick={() => reload(range.days)}
+              >
+                {range.label}
+              </button>
+            ))}
+          </div>
+          <button type="button" className="tab" onClick={() => reload()} disabled={loading}>
+            {loading ? 'Loading…' : 'Refresh'}
+          </button>
+        </div>
+      </div>
+
+      {error && <p className="error-text">{error}</p>}
+
+      {data && (
+        <div className={`metrics-grid ${loading ? 'stale' : ''}`}>
+          <Stat label="Questions asked" value={data.questions} />
+          <Stat
+            label="Answered from the documents"
+            value={data.answered}
+            detail={percent(data.answered, data.questions)}
+          />
+          <Stat
+            label="Not covered (no model call)"
+            value={data.refused}
+            detail={percent(data.refused, data.questions)}
+          />
+          <Stat
+            label="Failed"
+            value={data.failed}
+            detail={data.failed ? 'model busy or usage limit' : 'no errors'}
+          />
+          <Stat
+            label="Average response time"
+            value={data.avg_seconds === null ? '—' : `${data.avg_seconds} s`}
+            detail={data.p95_seconds === null ? null : `95% within ${data.p95_seconds} s`}
+          />
+          <Stat
+            label="Helpful (👍)"
+            value={data.helpful_rate === null ? '—' : `${Math.round(data.helpful_rate * 100)}%`}
+            detail={
+              data.feedback_votes
+                ? `${data.feedback_votes} ${data.feedback_votes === 1 ? 'vote' : 'votes'}`
+                : 'no votes yet'
+            }
+          />
+        </div>
+      )}
+    </main>
+  )
+}

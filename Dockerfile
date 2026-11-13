@@ -26,7 +26,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY rag_assistant.py api.py ./
+COPY rag_assistant.py api.py metrics.py ./
 COPY --from=website /website/dist ./static
 
 # run as a normal user, not root, and give it the data folder

@@ -3,6 +3,7 @@ import { api, setAccessKey } from './api'
 import AccessKeyForm from './components/AccessKeyForm'
 import Chat from './components/Chat'
 import DocumentPanel from './components/DocumentPanel'
+import MetricsPage from './components/MetricsPage'
 
 const POLL_MS = 3000
 
@@ -12,6 +13,7 @@ export default function App() {
   const [documentsError, setDocumentsError] = useState('')
   const [messages, setMessages] = useState([])
   const [asking, setAsking] = useState(false)
+  const [page, setPage] = useState('chat') // 'chat' or 'metrics'
 
   // a 401 anywhere means the key is missing or wrong: show the key form
   const handleApiError = useCallback((error) => {
@@ -70,20 +72,41 @@ export default function App() {
     <div className="layout">
       <header className="top-bar">
         <span className="logo">Support RAG Assistant</span>
-        <span className="muted">Answers only from your PDFs</span>
+        <span className="muted tagline">Answers only from your PDFs</span>
+        <nav className="nav" aria-label="Pages">
+          {['chat', 'metrics'].map((name) => (
+            <button
+              key={name}
+              type="button"
+              className={`tab ${page === name ? 'active' : ''}`}
+              aria-current={page === name ? 'page' : undefined}
+              onClick={() => setPage(name)}
+            >
+              {name === 'chat' ? 'Chat' : 'Metrics'}
+            </button>
+          ))}
+        </nav>
       </header>
-      <DocumentPanel
-        documents={documents}
-        error={documentsError}
-        onChange={refreshDocuments}
-        onApiError={handleApiError}
-      />
-      <Chat
-        messages={messages}
-        asking={asking}
-        onAsk={handleAsk}
-        hasDocuments={documents.some((doc) => doc.status === 'ready')}
-      />
+      {page === 'metrics' ? (
+        <MetricsPage onApiError={handleApiError} />
+      ) : (
+        <>
+          <DocumentPanel
+            documents={documents}
+            error={documentsError}
+            onChange={refreshDocuments}
+            onApiError={handleApiError}
+          />
+          {/* the chat stays in memory while you look at the metrics */}
+          <Chat
+            messages={messages}
+            asking={asking}
+            onAsk={handleAsk}
+            hasDocuments={documents.some((doc) => doc.status === 'ready')}
+            onApiError={handleApiError}
+          />
+        </>
+      )}
     </div>
   )
 }

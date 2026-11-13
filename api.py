@@ -12,6 +12,8 @@ APP_ACCESS_KEY is set in .env):
     POST   /api/documents           upload a PDF (indexed in the background)
     DELETE /api/documents/{name}    remove a PDF and its chunks
     POST   /api/ask                 ask a question about the documents
+    POST   /api/feedback            👍/👎 on an answer (saved in Langfuse)
+    GET    /api/metrics?days=7      usage numbers for the metrics page
 """
 
 import os
@@ -27,6 +29,7 @@ from fastapi import (
     APIRouter,
     BackgroundTasks,
     Depends,
+    Query,
     FastAPI,
     HTTPException,
     Request,
@@ -38,6 +41,7 @@ from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import metrics
 import rag_assistant as rag
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024    # 25 MB
@@ -53,6 +57,8 @@ class Services:
     langfuse: Any
     collection: Any
     pdf_dir: Path
+    # feedback and metrics live in Langfuse, so they need its keys
+    tracing: bool = False
     # file name -> "processing" or "failed: <reason>"; finished files drop out
     jobs: dict[str, str] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -70,6 +76,7 @@ def create_services() -> Services:
         langfuse=rag.make_langfuse(),
         collection=collection,
         pdf_dir=rag.PDF_DIR,
+        tracing=rag.tracing_configured(),
     )
 
 
@@ -121,6 +128,25 @@ class AskResponse(BaseModel):
     sources: list[Source]
     trace_id: str | None
     trace_url: str | None
+
+
+class FeedbackRequest(BaseModel):
+    # the trace_id from /api/ask: 32 lowercase hex characters
+    trace_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    helpful: bool
+
+
+class MetricsResponse(BaseModel):
+    days: int
+    environment: str
+    questions: int
+    answered: int
+    refused: int
+    failed: int
+    avg_seconds: float | None
+    p95_seconds: float | None
+    feedback_votes: int
+    helpful_rate: float | None
 
 
 # --- Helpers ---
@@ -247,6 +273,42 @@ def ask(body: AskRequest, services: ServicesDep) -> AskResponse:
         trace_id=result["trace_id"],
         trace_url=result["trace_url"],
     )
+
+
+def require_tracing(services: Services) -> None:
+    if not services.tracing:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Feedback and metrics need Langfuse: set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY.",
+        )
+
+
+@protected.post("/feedback", status_code=status.HTTP_204_NO_CONTENT)
+def feedback(body: FeedbackRequest, services: ServicesDep) -> None:
+    require_tracing(services)
+    services.langfuse.create_score(
+        name=metrics.FEEDBACK_SCORE,
+        value=1 if body.helpful else 0,
+        data_type="BOOLEAN",
+        trace_id=body.trace_id,
+        # one score ID per answer: changing your vote replaces the old one
+        score_id=f"{body.trace_id}-feedback",
+    )
+
+
+@protected.get("/metrics", response_model=MetricsResponse)
+def get_metrics(
+    services: ServicesDep,
+    days: Annotated[int, Query(ge=1, le=30)] = 7,  # the free plan keeps 30 days
+) -> MetricsResponse:
+    require_tracing(services)
+    try:
+        return MetricsResponse(**metrics.summary(services.langfuse, days))
+    except Exception as error:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Couldn't load the numbers from Langfuse. Try again in a minute.",
+        ) from error
 
 
 # --- App ---

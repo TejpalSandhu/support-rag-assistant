@@ -143,7 +143,9 @@ npm run dev        # open http://localhost:5173
 
 Upload PDFs on the left, ask questions on the right. Answers show which
 passages they came from, and questions the documents don't cover are clearly
-marked instead of guessed. `npm test` runs the website's tests and
+marked instead of guessed. Each answer has 👍/👎 buttons, and the **Metrics**
+page shows how many questions were answered, refused or failed, response
+times and the 👍 rate (read live from Langfuse; needs Langfuse keys). `npm test` runs the website's tests and
 `npm run lint` checks the code.
 
 ### Docker (website + API with one command)
@@ -186,6 +188,8 @@ logs in to Azure with OIDC, so no Azure password is stored anywhere.
 | `POST /api/documents` | Upload a PDF; it's indexed in the background |
 | `DELETE /api/documents/{name}` | Remove a PDF and its chunks |
 | `POST /api/ask` | `{"question": "..."}` -> answer, sources, score, trace link |
+| `POST /api/feedback` | `{"trace_id": "...", "helpful": true}`: a 👍/👎 saved as a Langfuse score |
+| `GET /api/metrics?days=7` | Questions, answered/refused/failed, response time, 👍 rate |
 
 If `APP_ACCESS_KEY` is set in `.env`, every endpoint except health needs the
 header `X-API-Key: <your key>`. The tests use a fake Gemini client, so they
@@ -202,6 +206,7 @@ reached, and resumes where it left off on the next run.
 ```
 rag_assistant.py       the assistant: ingest, embed, store, retrieve, refuse, answer, trace
 api.py                 web API (FastAPI) around rag_assistant.py, with an access key
+metrics.py             numbers for the metrics page, from Langfuse's Metrics API
 tests/                 automated API tests with a fake Gemini client (pytest)
 frontend/              React website: upload PDFs, chat with sources (Vite, Vitest)
 Dockerfile             backend image; frontend/Dockerfile builds the site into nginx

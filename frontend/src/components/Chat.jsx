@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
+import { api } from '../api'
 
 const SNIPPET_CHARS = 300
 
@@ -29,7 +30,51 @@ function Sources({ sources, covered }) {
   )
 }
 
-function Message({ message }) {
+// 👍/👎 under an answer; saved in Langfuse on the answer's trace
+function Feedback({ traceId, onApiError }) {
+  const [vote, setVote] = useState(null) // true = helpful, false = not, null = no vote
+  const [error, setError] = useState('')
+
+  async function send(helpful) {
+    const previous = vote
+    setVote(helpful) // show it straight away; undo if saving fails
+    setError('')
+    try {
+      await api.sendFeedback(traceId, helpful)
+    } catch (err) {
+      setVote(previous)
+      if (!onApiError(err)) setError(err.message)
+    }
+  }
+
+  return (
+    <div className="feedback">
+      <span className="muted small">Was this helpful?</span>
+      <button
+        type="button"
+        className={`vote ${vote === true ? 'chosen' : ''}`}
+        aria-label="Helpful"
+        aria-pressed={vote === true}
+        onClick={() => send(true)}
+      >
+        👍
+      </button>
+      <button
+        type="button"
+        className={`vote ${vote === false ? 'chosen' : ''}`}
+        aria-label="Not helpful"
+        aria-pressed={vote === false}
+        onClick={() => send(false)}
+      >
+        👎
+      </button>
+      {vote !== null && !error && <span className="muted small">Thanks for the feedback</span>}
+      {error && <span className="error-text small">{error}</span>}
+    </div>
+  )
+}
+
+function Message({ message, onApiError }) {
   if (message.role === 'user') {
     return <div className="message user">{message.text}</div>
   }
@@ -53,11 +98,12 @@ function Message({ message }) {
           View trace in Langfuse
         </a>
       )}
+      {result.trace_id && <Feedback traceId={result.trace_id} onApiError={onApiError} />}
     </div>
   )
 }
 
-export default function Chat({ messages, asking, onAsk, hasDocuments }) {
+export default function Chat({ messages, asking, onAsk, hasDocuments, onApiError }) {
   const [question, setQuestion] = useState('')
   const bottom = useRef(null)
 
@@ -95,7 +141,7 @@ export default function Chat({ messages, asking, onAsk, hasDocuments }) {
           </div>
         )}
         {messages.map((message, index) => (
-          <Message key={index} message={message} />
+          <Message key={index} message={message} onApiError={onApiError} />
         ))}
         {asking && <div className="message assistant thinking">Searching the documents…</div>}
         <div ref={bottom} />

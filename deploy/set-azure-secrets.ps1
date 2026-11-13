@@ -50,6 +50,8 @@ foreach ($name in $secretNames.Keys) {
 foreach ($name in "LANGFUSE_BASE_URL", "GENERATION_MODEL") {
     if ($values[$name]) { $envVars += "$name=$($values[$name])" }
 }
+# live traces are tagged "production", so local tests don't mix into the metrics page
+$envVars += "LANGFUSE_TRACING_ENVIRONMENT=production"
 
 Write-Host "Saving $($secrets.Count) secrets to $app..."
 az containerapp secret set --name $app --resource-group $group --secrets @secrets --output none

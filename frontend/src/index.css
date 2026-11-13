@@ -154,7 +154,32 @@ textarea {
   font-size: 1.15rem;
 }
 
+.nav {
+  margin-left: auto;
+  display: flex;
+  gap: 0.25rem;
+}
+
+/* secondary buttons: page tabs, time ranges, refresh */
+.tab {
+  padding: 0.35rem 0.8rem;
+  background: none;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.tab.active {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 @media (max-width: 760px) {
+  .tagline {
+    display: none;
+  }
+
   .layout {
     height: auto;
     min-height: 100vh;
@@ -351,4 +376,87 @@ textarea {
 
 .ask-form textarea {
   resize: none;
+}
+
+/* --- feedback under an answer --- */
+
+.feedback {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.vote {
+  padding: 0.15rem 0.5rem;
+  background: none;
+  border: 1px solid var(--border);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.vote.chosen {
+  border-color: var(--accent);
+  background: var(--bg);
+}
+
+/* --- metrics page --- */
+
+.metrics-page {
+  grid-column: 1 / -1;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.metrics-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.metrics-header p {
+  margin: 0;
+}
+
+.metrics-controls,
+.range {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.metrics-controls {
+  gap: 0.75rem;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 0.75rem;
+  transition: opacity 0.15s;
+}
+
+.metrics-grid.stale {
+  opacity: 0.6;
+}
+
+.stat {
+  padding: 1rem;
+}
+
+.stat-label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.stat-value {
+  font-size: 1.9rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0.25rem 0;
+  font-variant-numeric: tabular-nums;
 }
