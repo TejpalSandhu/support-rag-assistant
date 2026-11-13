@@ -1,11 +1,23 @@
-# Backend: the FastAPI app around rag_assistant.py
+# Backend: the FastAPI app around rag_assistant.py, plus the built website
+# (on Azure this one container serves both; docker compose uses nginx for
+# the website instead)
 
+# stage 1: build the React website (only this stage needs Node.js)
+FROM node:22-alpine AS website
+WORKDIR /website
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# stage 2: the Python app
 FROM python:3.12-slim
 
 # no .pyc files in the image, and print logs straight away
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DATA_DIR=/data
+    DATA_DIR=/data \
+    STATIC_DIR=/app/static
 
 WORKDIR /app
 
@@ -15,6 +27,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY rag_assistant.py api.py ./
+COPY --from=website /website/dist ./static
 
 # run as a normal user, not root, and give it the data folder
 RUN useradd --create-home app && mkdir -p /data && chown app:app /data

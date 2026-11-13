@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 chroma_db/
+index_backup/
 embedded_chunks.json
 *.pdf
 study/

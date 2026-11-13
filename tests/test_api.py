@@ -1,5 +1,9 @@
 from types import SimpleNamespace
 
+import chromadb
+from fastapi.testclient import TestClient
+
+import api
 import rag_assistant as rag
 from conftest import FAKE_ANSWER
 
@@ -26,6 +30,17 @@ def test_protected_endpoints_need_the_right_key(client, monkeypatch):
     assert client.get("/api/documents").status_code == 401
     assert client.get("/api/documents", headers={"X-API-Key": "wrong"}).status_code == 401
     assert client.get("/api/documents", headers={"X-API-Key": "secret-123"}).status_code == 200
+
+
+def test_backend_can_serve_the_website(services, monkeypatch, tmp_path):
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text("<h1>Support RAG Assistant</h1>")
+    monkeypatch.setenv("STATIC_DIR", str(site))
+
+    with TestClient(api.create_app(services)) as client:
+        assert "Support RAG Assistant" in client.get("/").text
+        assert client.get("/api/health").json() == {"status": "ok"}  # API still wins
 
 
 # --- Uploading ---
@@ -80,6 +95,66 @@ def test_delete_removes_file_and_chunks(client, services, make_pdf):
     assert client.get("/api/documents").json() == []
     assert not (services.pdf_dir / "manual.pdf").exists()
     assert client.delete("/api/documents/manual.pdf").status_code == 404
+
+
+# --- Backups (so the index survives a fresh container) ---
+
+def test_upload_saves_a_backup_and_delete_removes_it(client, make_pdf):
+    upload(client, "manual.pdf", make_pdf([FILAMENT_PAGE, NOZZLE_PAGE]))
+    backup = rag.BACKUP_DIR / "manual.pdf.json"
+    assert backup.exists()
+
+    client.delete("/api/documents/manual.pdf")
+    assert not backup.exists()
+
+
+def test_restore_rebuilds_an_empty_index_without_calling_gemini(client, fake_gemini, make_pdf, tmp_path):
+    upload(client, "manual.pdf", make_pdf([FILAMENT_PAGE, NOZZLE_PAGE]))
+    embed_calls = fake_gemini.models.embed_calls
+
+    # a brand-new, empty Chroma, like a container that just started
+    fresh = chromadb.PersistentClient(path=str(tmp_path / "fresh_db")).get_or_create_collection(
+        name="fresh", configuration={"hnsw": {"space": "cosine"}}, embedding_function=None,
+    )
+    assert rag.restore_backups(fresh) == ["manual.pdf"]
+    assert rag.list_documents(fresh) == {"manual.pdf": 2}
+    assert fake_gemini.models.embed_calls == embed_calls
+
+    # already there: nothing to do the second time
+    assert rag.restore_backups(fresh) == []
+
+
+class FakeBlobContainer:
+    """Stands in for azure.storage.blob.ContainerClient, keeping blobs in a dict."""
+
+    def __init__(self):
+        self.blobs = {}
+
+    def upload_blob(self, name, data, overwrite=False):
+        self.blobs[name] = data
+
+    def get_blob_client(self, name):
+        return SimpleNamespace(exists=lambda: name in self.blobs)
+
+    def delete_blob(self, name):
+        del self.blobs[name]
+
+    def list_blobs(self):
+        return [SimpleNamespace(name=name) for name in self.blobs]
+
+    def download_blob(self, name):
+        return SimpleNamespace(readall=lambda: self.blobs[name])
+
+
+def test_blob_backups_save_load_and_delete():
+    backups = rag.BlobBackups(FakeBlobContainer())
+    backups.save("b.pdf.json", b"two")
+    backups.save("a.pdf.json", b"one")
+    assert backups.load_all() == [("a.pdf.json", b"one"), ("b.pdf.json", b"two")]
+
+    backups.delete("a.pdf.json")
+    backups.delete("missing.pdf.json")  # no error for a file that isn't there
+    assert backups.load_all() == [("b.pdf.json", b"two")]
 
 
 # --- Asking ---

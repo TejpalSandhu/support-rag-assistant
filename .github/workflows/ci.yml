@@ -73,3 +73,56 @@ jobs:
           push: false
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
+
+  deploy:
+    name: Deploy to Azure
+    # only after the tests pass, and only for main (not pull requests)
+    needs: [backend, frontend]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push the image to GitHub Container Registry
+      id-token: write   # log in to Azure without a stored password (OIDC)
+    # never cancel a deploy halfway; a newer one waits for it instead
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    env:
+      IMAGE: ghcr.io/tejpalsandhu/support-rag-assistant
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push the app image (API + website)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          # the commit ID as the tag, so every deploy is traceable to a commit
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Point the container app at the new image
+        run: |
+          az containerapp update --name support-rag --resource-group support-rag-rg \
+            --image "$IMAGE:${{ github.sha }}" --output none
+      - name: Check the live site answers
+        run: |
+          url="https://$(az containerapp show --name support-rag --resource-group support-rag-rg \
+            --query properties.configuration.ingress.fqdn --output tsv)"
+          # the app may be scaled to zero, so allow time for it to start
+          curl --fail --silent --show-error --retry 10 --retry-delay 10 --retry-all-errors \
+            --max-time 30 "$url/api/health"
+          echo "Live at $url"

@@ -70,9 +70,12 @@ def fake_gemini():
 @pytest.fixture
 def services(tmp_path, fake_gemini, monkeypatch):
     monkeypatch.delenv("APP_ACCESS_KEY", raising=False)
+    # backups go to a temp folder, never to real Azure storage
+    monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING", raising=False)
     monkeypatch.setattr(rag.time, "sleep", lambda seconds: None)  # no real waiting
     # fake vectors give lower scores than Gemini, so use a test threshold
     monkeypatch.setattr(rag, "MIN_SCORE", 0.4)
+    monkeypatch.setattr(rag, "BACKUP_DIR", tmp_path / "index_backup")
 
     collection = chromadb.PersistentClient(path=str(tmp_path / "db")).get_or_create_collection(
         name="test_docs",

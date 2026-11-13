@@ -161,6 +161,22 @@ Settings come from `.env`; your `pdfs/` and `chroma_db/` folders are mounted
 into the backend, so nothing is embedded twice. Set `APP_ACCESS_KEY` before
 putting it anywhere public.
 
+### Live on Azure (automatic deploy)
+
+Every push to `main` that passes the tests is deployed to **Azure Container
+Apps**. The CI workflow builds one image (API plus the built website), pushes
+it to GitHub Container Registry, and points the container app at it. GitHub
+logs in to Azure with OIDC, so no Azure password is stored anywhere.
+
+- **One container, scales to zero:** it only runs (and costs) while in use;
+  the first visit after a quiet spell takes a little longer while it starts.
+- **Storage:** Chroma lives on the container's own disk. After a PDF is
+  indexed, its chunks and vectors are backed up as JSON to Azure Blob Storage,
+  and a fresh container rebuilds the index from those backups at startup,
+  without calling Gemini again.
+- **Secrets** (Gemini, Langfuse, the site password) are Azure secrets, copied
+  from `.env` by `deploy/set-azure-secrets.ps1`.
+
 ### Web API
 
 | Endpoint | What it does |
@@ -190,7 +206,8 @@ tests/                 automated API tests with a fake Gemini client (pytest)
 frontend/              React website: upload PDFs, chat with sources (Vite, Vitest)
 Dockerfile             backend image; frontend/Dockerfile builds the site into nginx
 docker-compose.yml     runs both containers together
-.github/workflows/     CI: tests, lint and Docker builds on every push
+.github/workflows/     CI/CD: tests, lint, Docker builds; deploys main to Azure
+deploy/                script that copies the keys from .env into Azure secrets
 evaluate.py            retrieval evaluation (hit@k, MRR) across chunk settings
 choose_threshold.py    picks the "docs don't cover this" threshold
 verify_chroma.py       checks Chroma's ranking against hand-written cosine similarity
@@ -234,4 +251,5 @@ experiments.md         experiment log: every change with before/after numbers
 ## Tech stack
 
 Python 3.12 · Google Gemini (`google-genai`: embeddings and generation) ·
-Chroma (vector database) · Langfuse (tracing) · pypdf
+Chroma (vector database) · Langfuse (tracing) · pypdf ·
+FastAPI · React (Vite) · Docker · GitHub Actions · Azure Container Apps and Blob Storage

@@ -1,4 +1,4 @@
-# Keep the image small and free of secrets: only the backend code goes in.
+# Keep the image small and free of secrets: only the code goes in.
 .env
 .venv/
 .git/
@@ -6,9 +6,11 @@
 __pycache__/
 *.pyc
 chroma_db/
+index_backup/
 pdfs/
 study/
-frontend/
+frontend/node_modules/
+frontend/dist/
 tests/
 repomix-output.xml
 embedded_chunks.json

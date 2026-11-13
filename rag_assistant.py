@@ -16,7 +16,9 @@ Run:
     python rag_assistant.py
 """
 
+import functools
 import hashlib
+import json
 import math
 import os
 import time
@@ -43,7 +45,14 @@ load_dotenv(BASE_DIR / ".env")
 # at a storage volume so the data survives restarts
 DATA_DIR = Path(os.getenv("DATA_DIR") or BASE_DIR)
 PDF_DIR = DATA_DIR / "pdfs"
-CHROMA_PATH = DATA_DIR / "chroma_db"
+# Chroma can live somewhere else (on Azure: the container's own disk,
+# because its SQLite file doesn't like network drives)
+CHROMA_PATH = Path(os.getenv("CHROMA_PATH") or DATA_DIR / "chroma_db")
+# one JSON file per uploaded PDF with its chunks and vectors, so the index
+# can be rebuilt without calling Gemini again (see restore_backups).
+# Saved in BACKUP_DIR, or in Azure Blob Storage when a connection string is set.
+BACKUP_DIR = DATA_DIR / "index_backup"
+BACKUP_CONTAINER = "index-backup"
 
 CHUNK_SIZE = 100       # words per chunk
 CHUNK_OVERLAP = 20     # words shared between neighbouring chunks
@@ -363,6 +372,7 @@ def index_pdf(
         collection.delete(ids=list(stale_ids))
 
     add_missing_chunks(collection, chunks, client, stored_ids)
+    save_backup(collection, pdf_path.name)
     return len(chunks)
 
 
@@ -376,6 +386,100 @@ def list_documents(collection: chromadb.Collection) -> dict[str, int]:
 
 def delete_document(collection: chromadb.Collection, source: str) -> None:
     collection.delete(where={"source": source})
+    backup_store().delete(f"{source}.json")
+
+
+class FolderBackups:
+    """Backups as files in a local folder."""
+
+    def __init__(self, folder: Path):
+        self.folder = folder
+
+    def save(self, name: str, data: bytes) -> None:
+        self.folder.mkdir(parents=True, exist_ok=True)
+        # write to a temp file first, so a crash never leaves half a backup
+        temp = self.folder / f"{name}.tmp"
+        temp.write_bytes(data)
+        temp.replace(self.folder / name)
+
+    def delete(self, name: str) -> None:
+        (self.folder / name).unlink(missing_ok=True)
+
+    def load_all(self) -> list[tuple[str, bytes]]:
+        return [(path.name, path.read_bytes()) for path in sorted(self.folder.glob("*.json"))]
+
+
+class BlobBackups:
+    """Backups as blobs (files) in an Azure Storage container."""
+
+    def __init__(self, container: Any):
+        self.container = container
+
+    def save(self, name: str, data: bytes) -> None:
+        # a blob upload is all-or-nothing, so no temp file needed
+        self.container.upload_blob(name, data, overwrite=True)
+
+    def delete(self, name: str) -> None:
+        if self.container.get_blob_client(name).exists():
+            self.container.delete_blob(name)
+
+    def load_all(self) -> list[tuple[str, bytes]]:
+        return [
+            (blob.name, self.container.download_blob(blob.name).readall())
+            for blob in sorted(self.container.list_blobs(), key=lambda blob: blob.name)
+        ]
+
+
+@functools.cache
+def blob_backups(connection_string: str) -> BlobBackups:
+    from azure.storage.blob import ContainerClient
+
+    container = ContainerClient.from_connection_string(connection_string, BACKUP_CONTAINER)
+    if not container.exists():
+        container.create_container()
+    return BlobBackups(container)
+
+
+def backup_store() -> FolderBackups | BlobBackups:
+    connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+    if connection_string:
+        return blob_backups(connection_string)
+    return FolderBackups(BACKUP_DIR)
+
+
+def save_backup(collection: chromadb.Collection, source: str) -> None:
+    """Back up one file's chunks and vectors as <file>.json."""
+    stored = collection.get(
+        where={"source": source},
+        include=["embeddings", "documents", "metadatas"],
+    )
+    backup = {
+        "ids": stored["ids"],
+        "embeddings": [[float(x) for x in vector] for vector in stored["embeddings"]],
+        "documents": stored["documents"],
+        "metadatas": stored["metadatas"],
+    }
+    backup_store().save(f"{source}.json", json.dumps(backup).encode("utf-8"))
+
+
+def restore_backups(collection: chromadb.Collection) -> list[str]:
+    """Load backed-up files missing from the collection; returns their names."""
+    stored_ids = set(collection.get(include=[])["ids"])
+    restored = []
+    for name, data in backup_store().load_all():
+        backup = json.loads(data)
+        if set(backup["ids"]) <= stored_ids:
+            continue
+        for start in range(0, len(backup["ids"]), 1000):
+            end = start + 1000
+            collection.upsert(
+                ids=backup["ids"][start:end],
+                embeddings=backup["embeddings"][start:end],
+                documents=backup["documents"][start:end],
+                metadatas=backup["metadatas"][start:end],
+            )
+        restored.append(name.removesuffix(".json"))
+    return restored
 
 
 def add_missing_chunks(

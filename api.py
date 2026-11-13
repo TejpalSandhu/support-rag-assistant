@@ -35,6 +35,7 @@ from fastapi import (
     status,
 )
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import rag_assistant as rag
@@ -58,11 +59,16 @@ class Services:
 
 
 def create_services() -> Services:
-    rag.PDF_DIR.mkdir(exist_ok=True)
+    rag.PDF_DIR.mkdir(parents=True, exist_ok=True)
+    collection = rag.get_collection()
+    # a fresh container starts with an empty Chroma: refill it from the backups
+    restored = rag.restore_backups(collection)
+    if restored:
+        print(f"Restored {len(restored)} document(s) from backup: {', '.join(restored)}")
     return Services(
         client=rag.make_gemini_client(),
         langfuse=rag.make_langfuse(),
-        collection=rag.get_collection(),
+        collection=collection,
         pdf_dir=rag.PDF_DIR,
     )
 
@@ -256,6 +262,12 @@ def create_app(services: Services | None = None) -> FastAPI:
     app = FastAPI(title="Support RAG Assistant", lifespan=lifespan)
     app.include_router(public)
     app.include_router(protected)
+
+    # on Azure there's no nginx: the backend also serves the built website.
+    # Added last, so /api/... routes are matched first.
+    static_dir = os.getenv("STATIC_DIR")
+    if static_dir and Path(static_dir).is_dir():
+        app.mount("/", StaticFiles(directory=static_dir, html=True), name="website")
     return app
 
 
