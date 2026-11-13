@@ -58,11 +58,13 @@ CHUNK_SIZE = 100       # words per chunk
 CHUNK_OVERLAP = 20     # words shared between neighbouring chunks
 TOP_K = 5              # hit@5 = 100% on the eval set (see experiments.md)
 # best-match score below which the docs don't cover the question; the model
-# isn't called. Chosen with choose_threshold.py for the 100/20 setting.
-MIN_SCORE = 0.631
+# isn't called. 0.631 was chosen with choose_threshold.py for the two manuals.
+# Other PDFs and broader questions score lower, so the website sets a looser
+# MIN_SCORE (0.55) and relies on the prompt to refuse what slips through.
+MIN_SCORE = float(os.getenv("MIN_SCORE") or 0.631)
 NOT_COVERED_MESSAGE = (
-    "Sorry, I couldn't find anything about that in the product manuals, "
-    "so I won't guess. Try rephrasing your question, or contact support."
+    "Sorry, I couldn't find anything about that in your documents, so I won't "
+    "guess. Try rephrasing your question, or ask about something they cover."
 )
 
 EMBEDDING_MODEL = "gemini-embedding-001"

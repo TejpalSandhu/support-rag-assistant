@@ -178,6 +178,12 @@ logs in to Azure with OIDC, so no Azure password is stored anywhere.
   without calling Gemini again.
 - **Secrets** (Gemini, Langfuse, the site password) are Azure secrets, copied
   from `.env` by `deploy/set-azure-secrets.ps1`.
+- **Threshold for any PDF:** `MIN_SCORE` was tuned to 0.631 on the two
+  manuals, but broad questions about other PDFs score lower (a real question
+  about a 2-page job description scored 0.599 and was wrongly refused). The
+  live site uses `MIN_SCORE=0.55`; the evaluation showed every answerable
+  question still passes and the prompt refuses the off-topic ones that get
+  through, while clearly unrelated questions (0.46-0.52) never reach the model.
 
 ### Web API
 
