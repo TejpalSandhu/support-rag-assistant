@@ -743,18 +743,21 @@ def ask(
     client: genai.Client,
     langfuse: Langfuse,
     owner: str | None = None,
+    chat_id: str | None = None,
 ) -> dict[str, Any]:
     """Answer one question, tracing each step in Langfuse. Prints nothing.
 
-    With an owner (website users), only that person's documents are searched.
+    With an owner (website users), only that person's documents are searched,
+    and the trace is tagged with the user and the chat (a Langfuse "session").
 
     Trace: support-question > embed-question > vector-search >
     relevance-check > answer (skipped when the best score < MIN_SCORE).
     Returns answer, covered, best_score, chunks, trace_id and trace_url.
     """
-    with langfuse.start_as_current_observation(
-        name="support-question", as_type="span", input=question
-    ) as root:
+    with propagate_attributes(user_id=owner, session_id=chat_id), \
+            langfuse.start_as_current_observation(
+                name="support-question", as_type="span", input=question,
+            ) as root:
         with langfuse.start_as_current_observation(
             name="embed-question", as_type="embedding",
             model=EMBEDDING_MODEL, input=question,

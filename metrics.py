@@ -38,8 +38,14 @@ def run_query(
     filters: list[dict[str, Any]],
     days: int,
     dimensions: tuple[str, ...] = (),
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """One Metrics API query over the last `days` days; returns its rows."""
+    """One Metrics API query over the last `days` days; returns its rows.
+
+    With a user_id, only that person's traces (and their scores) count.
+    """
+    if user_id:
+        filters = [*filters, {"column": "userId", "operator": "=", "value": user_id, "type": "string"}]
     now = datetime.now(timezone.utc)
     query = {
         "view": view,
@@ -59,12 +65,13 @@ def seconds(milliseconds: float | None) -> float | None:
     return None if milliseconds is None else round(milliseconds / 1000, 1)
 
 
-def summary(langfuse: Any, days: int) -> dict[str, Any]:
+def summary(langfuse: Any, days: int, user_id: str | None = None) -> dict[str, Any]:
+    """The metrics page's numbers; user_id=None means everyone."""
     # 1. how many questions, and how long they took (end to end)
     rows = run_query(
         langfuse, "observations",
         [("count", "count"), ("latency", "avg"), ("latency", "p95")],
-        [name_in("support-question")], days,
+        [name_in("support-question")], days, user_id=user_id,
     )
     timing = rows[0] if rows else {}
 
@@ -74,7 +81,7 @@ def summary(langfuse: Any, days: int) -> dict[str, Any]:
         for row in run_query(
             langfuse, "observations", [("count", "count")],
             [name_in("support-question", "answer")], days,
-            dimensions=("name", "level"),
+            dimensions=("name", "level"), user_id=user_id,
         )
     }
     questions = sum(n for (name, _), n in counts.items() if name == "support-question")
@@ -86,7 +93,7 @@ def summary(langfuse: Any, days: int) -> dict[str, Any]:
     # 3. feedback: the average of true(1)/false(0) votes is the 👍 rate
     rows = run_query(
         langfuse, "scores-boolean", [("count", "count"), ("value", "avg")],
-        [name_in(FEEDBACK_SCORE)], days,
+        [name_in(FEEDBACK_SCORE)], days, user_id=user_id,
     )
     feedback = rows[0] if rows else {}
     votes = int(feedback.get("count_count") or 0)

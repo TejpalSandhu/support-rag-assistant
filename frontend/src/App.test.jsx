@@ -10,6 +10,7 @@ const USER = {
   name: 'Friend',
   picture: '',
   login_enabled: true,
+  is_owner: false,
   questions_left_today: 20,
   daily_question_limit: 20,
 }
@@ -245,8 +246,8 @@ describe('App', () => {
   it('shows the metrics page and switches the time range', async () => {
     const calls = fakeBackend({
       'GET /api/documents': [[200, [READY_DOC]]],
-      'GET /api/metrics?days=7': [[200, METRICS]],
-      'GET /api/metrics?days=30': [[200, { ...METRICS, days: 30, questions: 40 }]],
+      'GET /api/metrics?days=7&scope=me': [[200, METRICS]],
+      'GET /api/metrics?days=30&scope=me': [[200, { ...METRICS, days: 30, questions: 40 }]],
     })
     const user = userEvent.setup()
     render(<App />)
@@ -261,7 +262,9 @@ describe('App', () => {
 
     await user.click(screen.getByRole('button', { name: '30 days' }))
     expect(await screen.findByText('40')).toBeInTheDocument()
-    expect(calls.at(-1).key).toBe('GET /api/metrics?days=30')
+    expect(calls.at(-1).key).toBe('GET /api/metrics?days=30&scope=me')
+    // not the owner: no way to see everyone's numbers
+    expect(screen.queryByRole('button', { name: 'Everyone' })).not.toBeInTheDocument()
   })
 
   it('saves the first question as a new chat and reopens it after a refresh', async () => {
@@ -331,5 +334,28 @@ describe('App', () => {
 
     await waitFor(() => expect(screen.queryByText('Old question')).not.toBeInTheDocument())
     expect(calls.some((c) => c.key === 'DELETE /api/chats/chat-9')).toBe(true)
+  })
+
+  it('lets the owner see everyone, with a table per person', async () => {
+    const people = [
+      { email: 'friend@gmail.com', questions: 5, last_active: '2026-11-13' },
+      { email: 'owner@gmail.com', questions: 2, last_active: '2026-11-12' },
+    ]
+    const calls = fakeBackend({
+      'GET /api/me': [[200, { ...USER, email: 'owner@gmail.com', is_owner: true }]],
+      'GET /api/documents': [[200, []]],
+      'GET /api/metrics?days=7&scope=me': [[200, METRICS]],
+      'GET /api/metrics?days=7&scope=all': [[200, { ...METRICS, scope: 'all', questions: 7, people }]],
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Metrics' }))
+    await screen.findByText('Questions asked')
+    await user.click(screen.getByRole('button', { name: 'Everyone' }))
+
+    expect(await screen.findByRole('cell', { name: 'friend@gmail.com' })).toBeInTheDocument()
+    expect(screen.getByText('7')).toBeInTheDocument()
+    expect(calls.at(-1).key).toBe('GET /api/metrics?days=7&scope=all')
   })
 })

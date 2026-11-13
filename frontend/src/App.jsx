@@ -214,7 +214,7 @@ export default function App() {
         </div>
       </header>
       {page === 'metrics' ? (
-        <MetricsPage onApiError={handleApiError} />
+        <MetricsPage onApiError={handleApiError} isOwner={user.is_owner} />
       ) : (
         <>
           <div className="sidebar">

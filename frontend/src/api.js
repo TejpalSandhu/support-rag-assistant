@@ -64,5 +64,6 @@ export const api = {
 
   sendFeedback: (traceId, helpful) => postJson('/feedback', { trace_id: traceId, helpful }),
 
-  getMetrics: (days) => request(`/metrics?days=${days}`),
+  // scope: 'me' (your numbers) or 'all' (everyone; owner only)
+  getMetrics: (days, scope = 'me') => request(`/metrics?days=${days}&scope=${scope}`),
 }

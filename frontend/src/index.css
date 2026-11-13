@@ -536,6 +536,43 @@ textarea {
   padding: 1rem;
 }
 
+.people {
+  margin-top: 1.25rem;
+  overflow-x: auto;
+}
+
+.people.stale {
+  opacity: 0.6;
+}
+
+.people-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.people-table caption {
+  text-align: left;
+  font-weight: 600;
+  padding-bottom: 0.5rem;
+}
+
+.people-table th,
+.people-table td {
+  text-align: left;
+  padding: 0.45rem 0.75rem 0.45rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.people-table th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.people-table .number {
+  font-variant-numeric: tabular-nums;
+}
+
 .stat-label {
   color: var(--muted);
   font-size: 0.85rem;

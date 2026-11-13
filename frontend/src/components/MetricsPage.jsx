@@ -11,6 +11,31 @@ function percent(part, whole) {
   return whole ? `${Math.round((part / whole) * 100)}% of questions` : '—'
 }
 
+function PeopleTable({ people }) {
+  if (people.length === 0) return <p className="muted small">Nobody has asked anything in this period.</p>
+  return (
+    <table className="people-table">
+      <caption>Questions per person (from the database)</caption>
+      <thead>
+        <tr>
+          <th scope="col">Person</th>
+          <th scope="col">Questions</th>
+          <th scope="col">Last active</th>
+        </tr>
+      </thead>
+      <tbody>
+        {people.map((person) => (
+          <tr key={person.email}>
+            <td>{person.email}</td>
+            <td className="number">{person.questions}</td>
+            <td>{person.last_active}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 function Stat({ label, value, detail }) {
   return (
     <div className="stat card">
@@ -21,8 +46,9 @@ function Stat({ label, value, detail }) {
   )
 }
 
-export default function MetricsPage({ onApiError }) {
+export default function MetricsPage({ onApiError, isOwner }) {
   const [days, setDays] = useState(7)
+  const [scope, setScope] = useState('me') // 'me' or 'all' (owner only)
   const [reloads, setReloads] = useState(0)
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
@@ -32,7 +58,7 @@ export default function MetricsPage({ onApiError }) {
   useEffect(() => {
     let current = true // ignore a slow reply after the range changed again
     api
-      .getMetrics(days)
+      .getMetrics(days, scope)
       .then((result) => {
         if (current) {
           setData(result)
@@ -48,11 +74,12 @@ export default function MetricsPage({ onApiError }) {
     return () => {
       current = false
     }
-  }, [days, reloads, onApiError])
+  }, [days, scope, reloads, onApiError])
 
-  function reload(newDays = days) {
+  function reload(newDays = days, newScope = scope) {
     setLoading(true)
     setDays(newDays)
+    setScope(newScope)
     setReloads((count) => count + 1)
   }
 
@@ -62,12 +89,30 @@ export default function MetricsPage({ onApiError }) {
         <div>
           <h2>Metrics</h2>
           <p className="muted small">
-            From the Langfuse traces of this site
-            {data && ` (environment "${data.environment}")`}. New questions show up within a
-            minute.
+            {scope === 'all' ? 'Everyone’s questions' : 'Your questions'}, from the Langfuse traces
+            of this site{data && ` (environment "${data.environment}")`}. New questions show up
+            within a minute.
           </p>
         </div>
         <div className="metrics-controls">
+          {isOwner && (
+            <div className="range" role="group" aria-label="Whose numbers">
+              {[
+                ['me', 'Just me'],
+                ['all', 'Everyone'],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`tab ${scope === value ? 'active' : ''}`}
+                  aria-pressed={scope === value}
+                  onClick={() => reload(days, value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="range" role="group" aria-label="Time range">
             {RANGES.map((range) => (
               <button
@@ -121,6 +166,12 @@ export default function MetricsPage({ onApiError }) {
                 : 'no votes yet'
             }
           />
+        </div>
+      )}
+
+      {data?.people && (
+        <div className={`people ${loading ? 'stale' : ''}`}>
+          <PeopleTable people={data.people} />
         </div>
       )}
     </main>

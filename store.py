@@ -104,10 +104,10 @@ class PostgresStore:
             (owner,),
         )
 
-    def create_chat(self, owner: str, title: str) -> str:
-        chat_id = uuid.uuid4()
-        self._run("INSERT INTO chats (id, owner, title) VALUES (%s, %s, %s)", (chat_id, owner, title))
-        return str(chat_id)
+    def create_chat(self, owner: str, title: str, chat_id: str | None = None) -> str:
+        key = parse_chat_id(chat_id) if chat_id else uuid.uuid4()
+        self._run("INSERT INTO chats (id, owner, title) VALUES (%s, %s, %s)", (key, owner, title))
+        return str(key)
 
     def chat_exists(self, owner: str, chat_id: str) -> bool:
         key = parse_chat_id(chat_id)
@@ -149,7 +149,23 @@ class PostgresStore:
         # messages go too (ON DELETE CASCADE)
         return bool(self._run("DELETE FROM chats WHERE id = %s AND owner = %s RETURNING id", (key, owner)))
 
+    def owns_trace(self, owner: str, trace_id: str) -> bool:
+        """Is this answer (by its Langfuse trace ID) in one of this person's chats?"""
+        return bool(self._run(
+            "SELECT 1 FROM messages m JOIN chats c ON c.id = m.chat_id "
+            "WHERE c.owner = %s AND m.details ->> 'trace_id' = %s LIMIT 1",
+            (owner, trace_id),
+        ))
+
     # --- daily question counter ---
+
+    def usage_by_person(self, since: date) -> list[dict[str, Any]]:
+        """Questions per person since a day, most active first (for the owner)."""
+        return self._run(
+            "SELECT owner AS email, sum(questions)::int AS questions, max(day) AS last_active "
+            "FROM daily_usage WHERE day >= %s GROUP BY owner ORDER BY questions DESC, owner",
+            (since,),
+        )
 
     def questions_used(self, owner: str, day: date) -> int:
         rows = self._run("SELECT questions FROM daily_usage WHERE owner = %s AND day = %s", (owner, day))
@@ -187,8 +203,8 @@ class MemoryStore:
         mine.sort(key=lambda c: c["updated_at"], reverse=True)
         return [{"id": c["id"], "title": c["title"], "updated_at": c["updated_at"]} for c in mine[:100]]
 
-    def create_chat(self, owner: str, title: str) -> str:
-        chat_id = str(uuid.uuid4())
+    def create_chat(self, owner: str, title: str, chat_id: str | None = None) -> str:
+        chat_id = str(parse_chat_id(chat_id) if chat_id else uuid.uuid4())
         with self.lock:
             self.chats[chat_id] = {
                 "id": chat_id, "owner": owner, "title": title,
@@ -218,6 +234,22 @@ class MemoryStore:
                 return False
             del self.chats[str(parse_chat_id(chat_id))]
             return True
+
+    def owns_trace(self, owner: str, trace_id: str) -> bool:
+        return any(
+            (message["details"] or {}).get("trace_id") == trace_id
+            for chat in self.chats.values() if chat["owner"] == owner
+            for message in chat["messages"]
+        )
+
+    def usage_by_person(self, since: date) -> list[dict[str, Any]]:
+        people: dict[str, dict[str, Any]] = {}
+        for (owner, day), count in self.usage.items():
+            if day >= since:
+                row = people.setdefault(owner, {"email": owner, "questions": 0, "last_active": day})
+                row["questions"] += count
+                row["last_active"] = max(row["last_active"], day)
+        return sorted(people.values(), key=lambda r: (-r["questions"], r["email"]))
 
     def questions_used(self, owner: str, day: date) -> int:
         return self.usage.get((owner, day), 0)

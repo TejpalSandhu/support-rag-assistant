@@ -20,17 +20,19 @@ when GOOGLE_CLIENT_ID is set; see auth.py):
     GET    /api/chats/{id}          one chat's messages
     DELETE /api/chats/{id}          delete a chat
     POST   /api/feedback            👍/👎 on an answer (saved in Langfuse)
-    GET    /api/metrics?days=7      usage numbers for the metrics page
+    GET    /api/metrics?days=7      your numbers for the metrics page
+    GET    /api/metrics?scope=all   everyone's numbers and a per-person table (owner only)
 """
 
 import os
 import re
 import threading
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -167,6 +169,7 @@ class Me(BaseModel):
     name: str
     picture: str
     login_enabled: bool
+    is_owner: bool
     questions_left_today: int
     daily_question_limit: int
 
@@ -177,8 +180,15 @@ class FeedbackRequest(BaseModel):
     helpful: bool
 
 
+class PersonUsage(BaseModel):
+    email: str
+    questions: int
+    last_active: date
+
+
 class MetricsResponse(BaseModel):
     days: int
+    scope: Literal["me", "all"]
     environment: str
     questions: int
     answered: int
@@ -188,6 +198,8 @@ class MetricsResponse(BaseModel):
     p95_seconds: float | None
     feedback_votes: int
     helpful_rate: float | None
+    # only for scope=all: questions per person (from the database)
+    people: list[PersonUsage] | None = None
 
 
 # --- Helpers ---
@@ -238,6 +250,7 @@ def me(user: UserDep, services: ServicesDep) -> Me:
         name=user.name,
         picture=user.picture,
         login_enabled=auth.login_enabled(),
+        is_owner=user.email == auth.owner_email(),
         questions_left_today=questions_left(services, user),
         daily_question_limit=daily_question_limit(),
     )
@@ -315,8 +328,12 @@ def ask(body: AskRequest, services: ServicesDep, user: UserDep) -> AskResponse:
         )
 
     try:
+        # a new chat gets its ID now, so the trace can be tagged with it;
+        # the chat itself is only saved once there is an answer
+        chat_id = body.chat_id or str(uuid.uuid4())
         result = rag.ask(
-            question, services.collection, services.client, services.langfuse, owner=user.email,
+            question, services.collection, services.client, services.langfuse,
+            owner=user.email, chat_id=chat_id,
         )
     except rag.DailyQuotaError as error:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(error))
@@ -348,7 +365,9 @@ def ask(body: AskRequest, services: ServicesDep, user: UserDep) -> AskResponse:
         ],
         trace_id=result["trace_id"],
         trace_url=result["trace_url"],
-        chat_id=body.chat_id or services.store.create_chat(user.email, chat_store.make_title(question)),
+        chat_id=body.chat_id or services.store.create_chat(
+            user.email, chat_store.make_title(question), chat_id=chat_id,
+        ),
     )
     # everything the website needs to show the answer again later
     details = response.model_dump(include={"covered", "best_score", "sources", "trace_id", "trace_url"})
@@ -384,8 +403,11 @@ def require_tracing(services: Services) -> None:
 
 
 @protected.post("/feedback", status_code=status.HTTP_204_NO_CONTENT)
-def feedback(body: FeedbackRequest, services: ServicesDep) -> None:
+def feedback(body: FeedbackRequest, services: ServicesDep, user: UserDep) -> None:
     require_tracing(services)
+    # only answers in your own chats: a guessed trace ID gets "not found"
+    if not services.store.owns_trace(user.email, body.trace_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Answer not found.")
     services.langfuse.create_score(
         name=metrics.FEEDBACK_SCORE,
         value=1 if body.helpful else 0,
@@ -399,16 +421,25 @@ def feedback(body: FeedbackRequest, services: ServicesDep) -> None:
 @protected.get("/metrics", response_model=MetricsResponse)
 def get_metrics(
     services: ServicesDep,
+    user: UserDep,
     days: Annotated[int, Query(ge=1, le=30)] = 7,  # the free plan keeps 30 days
+    scope: Literal["me", "all"] = "me",
 ) -> MetricsResponse:
     require_tracing(services)
+    if scope == "all" and user.email != auth.owner_email():
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the owner can see everyone's numbers.")
     try:
-        return MetricsResponse(**metrics.summary(services.langfuse, days))
+        numbers = metrics.summary(services.langfuse, days, user_id=user.email if scope == "me" else None)
     except Exception as error:
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             "Couldn't load the numbers from Langfuse. Try again in a minute.",
         ) from error
+    people = None
+    if scope == "all":
+        since = today() - timedelta(days=days - 1)
+        people = [PersonUsage(**row) for row in services.store.usage_by_person(since)]
+    return MetricsResponse(**numbers, scope=scope, people=people)
 
 
 # --- App ---

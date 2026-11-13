@@ -92,6 +92,33 @@ def test_daily_counter(store, people):
     assert store.questions_used(people.me, date(2026, 11, 14)) == 0  # per day
 
 
+def test_answers_belong_to_the_chat_owner(store, people):
+    chat = store.create_chat(people.me, "mine")
+    store.add_exchange(people.me, chat, "q", "a", {"trace_id": "abc123"})
+    assert store.owns_trace(people.me, "abc123") is True
+    assert store.owns_trace(people.other, "abc123") is False
+    assert store.owns_trace(people.me, "something-else") is False
+
+
+def test_chat_id_can_be_chosen_up_front(store, people):
+    chosen = "3f2a9b1c-0000-4000-8000-000000000001"
+    assert store.create_chat(people.me, "t", chat_id=chosen) == chosen
+    assert store.chat_exists(people.me, chosen)
+    store.delete_chat(people.me, chosen)  # the id is fixed, so clean up for re-runs
+
+
+def test_usage_per_person(store, people):
+    store.count_question(people.me, DAY)
+    store.count_question(people.me, date(2026, 11, 12))
+    store.count_question(people.other, DAY)
+    store.count_question(people.other, date(2026, 1, 1))  # before the range
+    rows = [r for r in store.usage_by_person(date(2026, 11, 10)) if r["email"] in (people.me, people.other)]
+    assert rows == [
+        {"email": people.me, "questions": 2, "last_active": DAY},
+        {"email": people.other, "questions": 1, "last_active": DAY},
+    ]
+
+
 def test_titles_are_short_and_on_one_line():
     assert chat_store.make_title("  How do I\\n load   filament? ".replace("\\n", "\n")) == "How do I load filament?"
     long = chat_store.make_title("word " * 40)
