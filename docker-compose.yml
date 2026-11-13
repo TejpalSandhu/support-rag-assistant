@@ -1,0 +1,23 @@
+# Run the whole app with:   docker compose up --build
+# then open http://localhost:8080
+
+services:
+  backend:
+    build: .
+    # GEMINI_API_KEY, APP_ACCESS_KEY, LANGFUSE_* ... come from your .env
+    env_file: .env
+    volumes:
+      # reuse the PDFs and vector database already on this computer,
+      # so nothing has to be embedded again
+      - ./pdfs:/data/pdfs
+      - ./chroma_db:/data/chroma_db
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

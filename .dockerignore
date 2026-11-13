@@ -1,0 +1,15 @@
+# Keep the image small and free of secrets: only the backend code goes in.
+.env
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+*.pyc
+chroma_db/
+pdfs/
+study/
+frontend/
+tests/
+repomix-output.xml
+embedded_chunks.json
+*.md
