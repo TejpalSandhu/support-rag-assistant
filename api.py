@@ -62,8 +62,8 @@ class Services:
     pdf_dir: Path
     # feedback and metrics live in Langfuse, so they need its keys
     tracing: bool = False
-    # file name -> "processing" or "failed: <reason>"; finished files drop out
-    jobs: dict[str, str] = field(default_factory=dict)
+    # (owner, file name) -> "processing" or "failed: <reason>"; finished files drop out
+    jobs: dict[tuple[str, str], str] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
     # (email, UTC date) -> questions asked that day. Kept in memory for now,
     # so it resets when the server restarts; moves to the database later.
@@ -72,9 +72,10 @@ class Services:
 
 def create_services() -> Services:
     rag.PDF_DIR.mkdir(parents=True, exist_ok=True)
-    collection = rag.get_collection()
+    collection = rag.get_web_collection()
     # a fresh container starts with an empty Chroma: refill it from the backups
-    restored = rag.restore_backups(collection)
+    # (files from before accounts existed go to the owner)
+    restored = rag.restore_backups(collection, legacy_owner=auth.owner_email())
     if restored:
         print(f"Restored {len(restored)} document(s) from backup: {', '.join(restored)}")
     return Services(
@@ -178,18 +179,23 @@ def safe_pdf_name(filename: str | None) -> str:
     return name
 
 
-def index_in_background(services: Services, name: str) -> None:
-    path = services.pdf_dir / name
+def pdf_path(services: Services, owner: str, name: str) -> Path:
+    # each person's PDFs in their own folder, named by a code, not the email
+    return services.pdf_dir / rag.owner_key(owner) / name
+
+
+def index_in_background(services: Services, owner: str, name: str) -> None:
+    path = pdf_path(services, owner, name)
     try:
-        rag.index_pdf(path, services.collection, services.client)
+        rag.index_pdf(path, services.collection, services.client, owner)
     except Exception as error:
         # e.g. a scanned PDF with no text, or the daily quota: clean up so
         # a broken file never sits half-indexed, and report it in the list
-        rag.delete_document(services.collection, name)
+        rag.delete_document(services.collection, owner, name)
         path.unlink(missing_ok=True)
-        services.jobs[name] = f"failed: {error}"
+        services.jobs[(owner, name)] = f"failed: {error}"
     else:
-        services.jobs.pop(name, None)
+        services.jobs.pop((owner, name), None)
 
 
 # --- Endpoints ---
@@ -216,12 +222,12 @@ def me(user: UserDep, services: ServicesDep) -> Me:
 
 
 @protected.get("/documents", response_model=list[DocumentInfo])
-def list_documents(services: ServicesDep) -> list[DocumentInfo]:
-    counts = rag.list_documents(services.collection)
-    names = sorted(set(counts) | set(services.jobs))
+def list_documents(services: ServicesDep, user: UserDep) -> list[DocumentInfo]:
+    counts = rag.list_documents(services.collection, user.email)
+    jobs = {name: state for (owner, name), state in services.jobs.items() if owner == user.email}
     return [
-        DocumentInfo(name=name, chunks=counts.get(name, 0), status=services.jobs.get(name, "ready"))
-        for name in names
+        DocumentInfo(name=name, chunks=counts.get(name, 0), status=jobs.get(name, "ready"))
+        for name in sorted(set(counts) | set(jobs))
     ]
 
 
@@ -230,6 +236,7 @@ def upload_document(
     file: UploadFile,
     background: BackgroundTasks,
     services: ServicesDep,
+    user: UserDep,
 ) -> DocumentInfo:
     name = safe_pdf_name(file.filename)
 
@@ -240,31 +247,35 @@ def upload_document(
     if not data.startswith(b"%PDF"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This file is not a PDF.")
 
+    job = (user.email, name)
     with services.lock:
-        if services.jobs.get(name) == "processing":
+        if services.jobs.get(job) == "processing":
             raise HTTPException(status.HTTP_409_CONFLICT, f"{name} is still being processed.")
-        services.jobs[name] = "processing"
+        services.jobs[job] = "processing"
 
-    services.pdf_dir.mkdir(parents=True, exist_ok=True)
-    (services.pdf_dir / name).write_bytes(data)
+    path = pdf_path(services, user.email, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
     # reading and embedding takes a while: answer now, index afterwards
-    background.add_task(index_in_background, services, name)
+    background.add_task(index_in_background, services, user.email, name)
     return DocumentInfo(name=name, chunks=0, status="processing")
 
 
 @protected.delete("/documents/{name}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_document(name: str, services: ServicesDep) -> None:
+def delete_document(name: str, services: ServicesDep, user: UserDep) -> None:
     name = safe_pdf_name(name)
-    if services.jobs.get(name) == "processing":
+    job = (user.email, name)
+    if services.jobs.get(job) == "processing":
         raise HTTPException(status.HTTP_409_CONFLICT, f"{name} is still being processed.")
 
-    path = services.pdf_dir / name
-    if name not in rag.list_documents(services.collection) and not path.exists():
+    # only your own files: someone else's file of the same name is a 404 too
+    path = pdf_path(services, user.email, name)
+    if name not in rag.list_documents(services.collection, user.email) and not path.exists()             and job not in services.jobs:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No document called {name}.")
 
-    rag.delete_document(services.collection, name)
+    rag.delete_document(services.collection, user.email, name)
     path.unlink(missing_ok=True)
-    services.jobs.pop(name, None)
+    services.jobs.pop(job, None)
 
 
 @protected.post("/ask", response_model=AskResponse)
@@ -280,7 +291,9 @@ def ask(body: AskRequest, services: ServicesDep, user: UserDep) -> AskResponse:
         )
 
     try:
-        result = rag.ask(question, services.collection, services.client, services.langfuse)
+        result = rag.ask(
+            question, services.collection, services.client, services.langfuse, owner=user.email,
+        )
     except rag.DailyQuotaError as error:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(error))
     except Exception as error:

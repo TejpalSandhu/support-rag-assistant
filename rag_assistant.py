@@ -324,6 +324,12 @@ def get_collection(
     return open_collection(collection_name(chunk_size, overlap))
 
 
+def get_web_collection() -> chromadb.Collection:
+    """The website's documents: kept apart from the manuals the CLI and
+    evaluation scripts use, so a CLI re-sync never touches people's uploads."""
+    return open_collection("web_" + collection_name(CHUNK_SIZE, CHUNK_OVERLAP))
+
+
 def make_chunk_ids(chunks: list[dict[str, Any]]) -> list[str]:
     """IDs like 'manual.pdf-p19-c1-3f2a9b1c' (file, page, chunk no., text hash).
 
@@ -336,8 +342,11 @@ def make_chunk_ids(chunks: list[dict[str, Any]]) -> list[str]:
         page_key = (chunk["source"], chunk["page"])
         count_per_page[page_key] = count_per_page.get(page_key, 0) + 1
         text_hash = hashlib.sha1(chunk["text"].encode("utf-8")).hexdigest()[:8]
+        # uploads from the website start with their owner, so two people's
+        # "manual.pdf" never share IDs
+        prefix = f"{owner_key(chunk['owner'])}/" if chunk.get("owner") else ""
         ids.append(
-            f"{chunk['source']}-p{chunk['page']}-c{count_per_page[page_key]}-{text_hash}"
+            f"{prefix}{chunk['source']}-p{chunk['page']}-c{count_per_page[page_key]}-{text_hash}"
         )
 
     return ids
@@ -362,14 +371,31 @@ def sync_collection(
         print(f"All {len(chunks)} chunks already stored in '{collection.name}'.")
 
 
+def owner_key(owner: str) -> str:
+    """A short, fixed code for an email, used in IDs and file paths.
+
+    'friend@gmail.com' -> 16 hex characters: no '@' or '.' in paths, and
+    the email itself isn't visible in folder or blob names.
+    """
+    return hashlib.sha256(owner.lower().encode("utf-8")).hexdigest()[:16]
+
+
+def one_file(owner: str, source: str) -> dict[str, Any]:
+    """Chroma filter for one person's copy of one file."""
+    return {"$and": [{"owner": owner}, {"source": source}]}
+
+
 def index_pdf(
     pdf_path: Path,
     collection: chromadb.Collection,
     client: genai.Client,
+    owner: str,
 ) -> int:
-    """(Re)index one PDF without touching other files; returns its chunk count."""
+    """(Re)index one person's PDF without touching other files; returns its chunk count."""
     chunks = chunk_documents(load_pdf_pages(pdf_path))
-    stored_ids = set(collection.get(where={"source": pdf_path.name}, include=[])["ids"])
+    for chunk in chunks:
+        chunk["owner"] = owner
+    stored_ids = set(collection.get(where=one_file(owner, pdf_path.name), include=[])["ids"])
 
     # an older upload with the same name
     stale_ids = stored_ids - set(make_chunk_ids(chunks))
@@ -377,21 +403,25 @@ def index_pdf(
         collection.delete(ids=list(stale_ids))
 
     add_missing_chunks(collection, chunks, client, stored_ids)
-    save_backup(collection, pdf_path.name)
+    save_backup(collection, owner, pdf_path.name)
     return len(chunks)
 
 
-def list_documents(collection: chromadb.Collection) -> dict[str, int]:
-    """{file name: number of stored chunks} for every file in the collection."""
+def list_documents(collection: chromadb.Collection, owner: str) -> dict[str, int]:
+    """{file name: number of stored chunks} for one person's files."""
     counts: dict[str, int] = {}
-    for metadata in collection.get(include=["metadatas"])["metadatas"]:
+    for metadata in collection.get(where={"owner": owner}, include=["metadatas"])["metadatas"]:
         counts[metadata["source"]] = counts.get(metadata["source"], 0) + 1
     return counts
 
 
-def delete_document(collection: chromadb.Collection, source: str) -> None:
-    collection.delete(where={"source": source})
-    backup_store().delete(f"{source}.json")
+def delete_document(collection: chromadb.Collection, owner: str, source: str) -> None:
+    collection.delete(where=one_file(owner, source))
+    backup_store().delete(backup_name(owner, source))
+
+
+def backup_name(owner: str, source: str) -> str:
+    return f"{owner_key(owner)}/{source}.json"
 
 
 class FolderBackups:
@@ -401,17 +431,21 @@ class FolderBackups:
         self.folder = folder
 
     def save(self, name: str, data: bytes) -> None:
-        self.folder.mkdir(parents=True, exist_ok=True)
+        path = self.folder / name  # name can include a folder: "<owner>/<file>.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
         # write to a temp file first, so a crash never leaves half a backup
-        temp = self.folder / f"{name}.tmp"
+        temp = path.with_name(path.name + ".tmp")
         temp.write_bytes(data)
-        temp.replace(self.folder / name)
+        temp.replace(path)
 
     def delete(self, name: str) -> None:
         (self.folder / name).unlink(missing_ok=True)
 
     def load_all(self) -> list[tuple[str, bytes]]:
-        return [(path.name, path.read_bytes()) for path in sorted(self.folder.glob("*.json"))]
+        return [
+            (path.relative_to(self.folder).as_posix(), path.read_bytes())
+            for path in sorted(self.folder.rglob("*.json"))
+        ]
 
 
 class BlobBackups:
@@ -452,10 +486,10 @@ def backup_store() -> FolderBackups | BlobBackups:
     return FolderBackups(BACKUP_DIR)
 
 
-def save_backup(collection: chromadb.Collection, source: str) -> None:
-    """Back up one file's chunks and vectors as <file>.json."""
+def save_backup(collection: chromadb.Collection, owner: str, source: str) -> None:
+    """Back up one person's file (chunks and vectors) as <owner>/<file>.json."""
     stored = collection.get(
-        where={"source": source},
+        where=one_file(owner, source),
         include=["embeddings", "documents", "metadatas"],
     )
     backup = {
@@ -464,15 +498,42 @@ def save_backup(collection: chromadb.Collection, source: str) -> None:
         "documents": stored["documents"],
         "metadatas": stored["metadatas"],
     }
-    backup_store().save(f"{source}.json", json.dumps(backup).encode("utf-8"))
+    backup_store().save(backup_name(owner, source), json.dumps(backup).encode("utf-8"))
 
 
-def restore_backups(collection: chromadb.Collection) -> list[str]:
-    """Load backed-up files missing from the collection; returns their names."""
+def adopt_backup(backup: dict[str, Any], owner: str) -> dict[str, Any]:
+    """Give a backup from before accounts existed an owner (and owner-prefixed IDs)."""
+    chunks = [
+        {"text": text, "source": metadata["source"], "page": metadata["page"], "owner": owner}
+        for text, metadata in zip(backup["documents"], backup["metadatas"])
+    ]
+    return {
+        "ids": make_chunk_ids(chunks),
+        "embeddings": backup["embeddings"],
+        "documents": backup["documents"],
+        "metadatas": [metadata | {"owner": owner} for metadata in backup["metadatas"]],
+    }
+
+
+def restore_backups(collection: chromadb.Collection, legacy_owner: str) -> list[str]:
+    """Load backed-up files missing from the collection; returns their names.
+
+    Backups saved before accounts existed have no owner: they are given to
+    `legacy_owner` (the app's owner) and re-saved in the new place.
+    """
+    store = backup_store()
     stored_ids = set(collection.get(include=[])["ids"])
     restored = []
-    for name, data in backup_store().load_all():
+    for name, data in store.load_all():
         backup = json.loads(data)
+        if not backup["ids"]:
+            continue
+        if any("owner" not in metadata for metadata in backup["metadatas"]):
+            backup = adopt_backup(backup, legacy_owner)
+            source = backup["metadatas"][0]["source"]
+            store.save(backup_name(legacy_owner, source), json.dumps(backup).encode("utf-8"))
+            store.delete(name)
+            name = backup_name(legacy_owner, source)
         if set(backup["ids"]) <= stored_ids:
             continue
         for start in range(0, len(backup["ids"]), 1000):
@@ -515,6 +576,8 @@ def add_missing_chunks(
             documents=[chunk["text"] for _, chunk in batch],
             metadatas=[
                 {"source": chunk["source"], "page": chunk["page"]}
+                # website uploads also record whose file it is
+                | ({"owner": chunk["owner"]} if chunk.get("owner") else {})
                 for _, chunk in batch
             ],
         )
@@ -554,14 +617,19 @@ def search(
     collection: chromadb.Collection,
     query_embedding: list[float],
     top_k: int = TOP_K,
+    owner: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Like retrieve(), but for a question that is already embedded."""
+    """Like retrieve(), but for a question that is already embedded.
+
+    With an owner, only that person's chunks are searched (website users).
+    """
     if collection.count() == 0:
         return []
 
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
+        where={"owner": owner} if owner else None,
         include=["documents", "metadatas", "distances"],
     )
 
@@ -674,8 +742,11 @@ def ask(
     collection: chromadb.Collection,
     client: genai.Client,
     langfuse: Langfuse,
+    owner: str | None = None,
 ) -> dict[str, Any]:
     """Answer one question, tracing each step in Langfuse. Prints nothing.
+
+    With an owner (website users), only that person's documents are searched.
 
     Trace: support-question > embed-question > vector-search >
     relevance-check > answer (skipped when the best score < MIN_SCORE).
@@ -695,7 +766,7 @@ def ask(
             name="vector-search", as_type="retriever", input=question,
             metadata={"collection": collection.name, "top_k": TOP_K},
         ) as step:
-            top_chunks = search(collection, query_embedding)
+            top_chunks = search(collection, query_embedding, owner=owner)
             step.update(output=[
                 {
                     "source": chunk["source"],

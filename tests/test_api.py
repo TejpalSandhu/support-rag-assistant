@@ -5,8 +5,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api
+import auth
 import rag_assistant as rag
 from conftest import FAKE_ANSWER
+
+ME = auth.LOCAL_USER_EMAIL  # login is off in these tests
+
+
+def my_pdf(services, name):
+    return api.pdf_path(services, ME, name)
+
 
 FILAMENT_PAGE = (
     "Loading filament: cut the filament tip, push the filament into the "
@@ -46,7 +54,7 @@ def test_upload_indexes_the_pdf(client, services, make_pdf):
     # TestClient runs background tasks before returning, so it's done now
     documents = client.get("/api/documents").json()
     assert documents == [{"name": "manual.pdf", "chunks": 2, "status": "ready"}]
-    assert (services.pdf_dir / "manual.pdf").exists()
+    assert my_pdf(services, "manual.pdf").exists()
 
 
 def test_upload_rejects_files_that_are_not_pdfs(client, make_pdf):
@@ -62,7 +70,7 @@ def test_upload_rejects_files_over_the_size_limit(client, monkeypatch, make_pdf)
 def test_upload_cannot_escape_the_pdf_folder(client, services, make_pdf, tmp_path):
     response = upload(client, "../../evil.pdf", make_pdf([NOZZLE_PAGE]))
     assert response.json()["name"] == "evil.pdf"
-    assert (services.pdf_dir / "evil.pdf").exists()
+    assert my_pdf(services, "evil.pdf").exists()
     assert not (tmp_path.parent / "evil.pdf").exists()
 
 
@@ -70,7 +78,7 @@ def test_pdf_without_text_is_reported_and_removed(client, services, make_pdf):
     upload(client, "scanned.pdf", make_pdf([""]))
     [document] = client.get("/api/documents").json()
     assert document["status"].startswith("failed: No extractable text")
-    assert not (services.pdf_dir / "scanned.pdf").exists()
+    assert not my_pdf(services, "scanned.pdf").exists()
 
 
 def test_reupload_replaces_the_old_version(client, services, make_pdf):
@@ -86,7 +94,7 @@ def test_delete_removes_file_and_chunks(client, services, make_pdf):
     upload(client, "manual.pdf", make_pdf([FILAMENT_PAGE]))
     assert client.delete("/api/documents/manual.pdf").status_code == 204
     assert client.get("/api/documents").json() == []
-    assert not (services.pdf_dir / "manual.pdf").exists()
+    assert not my_pdf(services, "manual.pdf").exists()
     assert client.delete("/api/documents/manual.pdf").status_code == 404
 
 
@@ -94,7 +102,7 @@ def test_delete_removes_file_and_chunks(client, services, make_pdf):
 
 def test_upload_saves_a_backup_and_delete_removes_it(client, make_pdf):
     upload(client, "manual.pdf", make_pdf([FILAMENT_PAGE, NOZZLE_PAGE]))
-    backup = rag.BACKUP_DIR / "manual.pdf.json"
+    backup = rag.BACKUP_DIR / rag.backup_name(ME, "manual.pdf")
     assert backup.exists()
 
     client.delete("/api/documents/manual.pdf")
@@ -109,12 +117,12 @@ def test_restore_rebuilds_an_empty_index_without_calling_gemini(client, fake_gem
     fresh = chromadb.PersistentClient(path=str(tmp_path / "fresh_db")).get_or_create_collection(
         name="fresh", configuration={"hnsw": {"space": "cosine"}}, embedding_function=None,
     )
-    assert rag.restore_backups(fresh) == ["manual.pdf"]
-    assert rag.list_documents(fresh) == {"manual.pdf": 2}
+    assert rag.restore_backups(fresh, legacy_owner=ME) == [rag.backup_name(ME, "manual.pdf").removesuffix(".json")]
+    assert rag.list_documents(fresh, ME) == {"manual.pdf": 2}
     assert fake_gemini.models.embed_calls == embed_calls
 
     # already there: nothing to do the second time
-    assert rag.restore_backups(fresh) == []
+    assert rag.restore_backups(fresh, legacy_owner=ME) == []
 
 
 class FakeBlobContainer:

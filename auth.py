@@ -15,7 +15,8 @@ Settings (environment variables):
     GOOGLE_CLIENT_ID   from Google Cloud Console; if empty, login is off and
                        everyone is "local@localhost" (local development)
     SESSION_SECRET     a long random string that signs the cookies
-    ALLOWED_EMAILS     comma-separated emails that may use the app
+    ALLOWED_EMAILS     comma-separated emails that may use the app; the
+                       first one is the owner
     COOKIE_SECURE      "true" on the live site: cookie only sent over HTTPS
     REQUIRE_LOGIN      "true" on the live site: refuse to start without the
                        settings above, so a config mistake can't leave the
@@ -57,6 +58,12 @@ def allowed_emails() -> set[str]:
         for email in os.getenv("ALLOWED_EMAILS", "").split(",")
         if email.strip()
     }
+
+
+def owner_email() -> str:
+    """The app's owner: the first email in ALLOWED_EMAILS (or the local user)."""
+    emails = [e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()]
+    return emails[0] if login_enabled() and emails else LOCAL_USER_EMAIL
 
 
 def verify_google_token(credential: str) -> dict:

@@ -196,6 +196,15 @@ Only people on an email allowlist can use the site:
 3. It then sets a signed, HttpOnly, SameSite session cookie for 7 days.
    Removing an email from the list locks that person out on their next request.
 
+**Everyone has their own documents.** Every chunk is stored with its owner's
+email, and listing, searching and deleting only ever see the signed-in
+person's chunks, so two people can each have a `manual.pdf`. Uploaded files
+and backups live under a short hash of the email (`<owner code>/manual.pdf.json`),
+so addresses don't appear in paths. The first email in `ALLOWED_EMAILS` is the
+owner, who receives anything uploaded before accounts existed. The website
+uses its own Chroma collection, separate from the manuals used by the CLI and
+the evaluation scripts.
+
 Each person gets `DAILY_QUESTION_LIMIT` questions a day (default 20), so one
 user can't use up the shared free Gemini quota. The live site runs with
 `REQUIRE_LOGIN=true`: if the Google settings are ever missing, it refuses to
