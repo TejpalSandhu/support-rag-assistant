@@ -210,13 +210,81 @@ textarea {
   .chat {
     min-height: 70vh;
   }
+
+  .documents {
+    max-height: none;
+  }
 }
 
-/* --- documents panel --- */
+/* --- left column: documents and chats --- */
+
+.sidebar {
+  display: grid;
+  grid-template-rows: minmax(0, auto) minmax(0, 1fr);
+  gap: 1rem;
+  min-height: 0;
+}
 
 .documents {
   padding: 1rem;
   overflow-y: auto;
+  max-height: 45vh;
+}
+
+.chats-fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.chats {
+  flex: 1;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.chat-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.chat-list li {
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius);
+}
+
+.chat-list li.current {
+  background: var(--bg);
+  outline: 1px solid var(--accent);
+}
+
+.chat-open {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  background: none;
+  color: var(--text);
+}
+
+.chat-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+
+.chat-delete {
+  padding: 0.4rem 0.6rem;
+  color: var(--muted);
 }
 
 .panel-header {

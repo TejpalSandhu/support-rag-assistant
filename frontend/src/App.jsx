@@ -1,11 +1,39 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api'
 import Chat from './components/Chat'
+import ChatList from './components/ChatList'
 import DocumentPanel from './components/DocumentPanel'
 import MetricsPage from './components/MetricsPage'
 import SignIn from './components/SignIn'
 
 const POLL_MS = 3000
+
+// the chat you had open, so a page refresh brings it back (per account)
+const lastChatKey = (email) => `support-rag-last-chat:${email}`
+function rememberChat(email, chatId) {
+  try {
+    if (chatId) localStorage.setItem(lastChatKey(email), chatId)
+    else localStorage.removeItem(lastChatKey(email))
+  } catch {
+    // storage blocked: the chat just won't reopen after a refresh
+  }
+}
+function lastChat(email) {
+  try {
+    return localStorage.getItem(lastChatKey(email))
+  } catch {
+    return null
+  }
+}
+
+// saved messages -> the shape the chat view shows
+function toMessages(saved) {
+  return saved.map((message) =>
+    message.role === 'user'
+      ? { role: 'user', text: message.content }
+      : { role: 'assistant', result: { ...message.details, answer: message.content } },
+  )
+}
 
 export default function App() {
   // undefined = still checking, null = signed out, object = signed in
@@ -16,7 +44,10 @@ export default function App() {
   const [messages, setMessages] = useState([])
   const [asking, setAsking] = useState(false)
   const [page, setPage] = useState('chat') // 'chat' or 'metrics'
-  const signedIn = Boolean(user)
+  const [chats, setChats] = useState([])
+  const [chatsError, setChatsError] = useState('')
+  const [currentChatId, setCurrentChatId] = useState(null) // null = a new chat
+  const email = user?.email
 
   // 401 = not signed in (or the session ran out), 403 = removed from the list
   const handleApiError = useCallback((error) => {
@@ -50,10 +81,56 @@ export default function App() {
     }
   }, [handleApiError])
 
-  // load the list after signing in
+  const refreshChats = useCallback(async () => {
+    try {
+      setChats(await api.listChats())
+      setChatsError('')
+    } catch (error) {
+      if (!handleApiError(error)) setChatsError(error.message)
+    }
+  }, [handleApiError])
+
+  const openChat = useCallback(
+    async (chatId) => {
+      try {
+        setMessages(toMessages(await api.getChat(chatId)))
+        setCurrentChatId(chatId)
+        rememberChat(email, chatId)
+        setPage('chat')
+      } catch (error) {
+        if (handleApiError(error)) return
+        if (error.status === 404) rememberChat(email, null) // deleted meanwhile
+        else setChatsError(error.message)
+      }
+    },
+    [email, handleApiError],
+  )
+
+  // after signing in: documents, chats, and the chat you had open
   useEffect(() => {
-    if (signedIn) refreshDocuments()
-  }, [signedIn, refreshDocuments])
+    if (!email) return
+    refreshDocuments()
+    refreshChats()
+    const previous = lastChat(email)
+    if (previous) openChat(previous)
+  }, [email, refreshDocuments, refreshChats, openChat])
+
+  function newChat() {
+    setCurrentChatId(null)
+    setMessages([])
+    rememberChat(email, null)
+  }
+
+  async function handleDeleteChat(chat) {
+    if (!window.confirm(`Delete the chat "${chat.title}"?`)) return
+    try {
+      await api.deleteChat(chat.id)
+      if (chat.id === currentChatId) newChat()
+    } catch (error) {
+      if (!handleApiError(error)) setChatsError(error.message)
+    }
+    refreshChats()
+  }
 
   // while a PDF is being processed, check its status every few seconds
   const processing = documents.some((doc) => doc.status === 'processing')
@@ -67,8 +144,14 @@ export default function App() {
     setMessages((previous) => [...previous, { role: 'user', text: question }])
     setAsking(true)
     try {
-      const result = await api.ask(question)
+      const result = await api.ask(question, currentChatId)
       setMessages((previous) => [...previous, { role: 'assistant', result }])
+      if (result.chat_id !== currentChatId) {
+        // the first question started a new chat
+        setCurrentChatId(result.chat_id)
+        rememberChat(email, result.chat_id)
+      }
+      refreshChats()
     } catch (error) {
       if (!handleApiError(error)) {
         setMessages((previous) => [...previous, { role: 'error', text: error.message }])
@@ -89,6 +172,8 @@ export default function App() {
     window.google?.accounts?.id?.disableAutoSelect() // don't sign straight back in
     setMessages([])
     setDocuments([])
+    setChats([])
+    setCurrentChatId(null)
     setPage('chat')
     setUser(null)
   }
@@ -132,12 +217,25 @@ export default function App() {
         <MetricsPage onApiError={handleApiError} />
       ) : (
         <>
-          <DocumentPanel
-            documents={documents}
-            error={documentsError}
-            onChange={refreshDocuments}
-            onApiError={handleApiError}
-          />
+          <div className="sidebar">
+            <DocumentPanel
+              documents={documents}
+              error={documentsError}
+              onChange={refreshDocuments}
+              onApiError={handleApiError}
+            />
+            {/* switching chats waits until an answer has arrived */}
+            <fieldset className="chats-fieldset" disabled={asking}>
+              <ChatList
+                chats={chats}
+                currentChatId={currentChatId}
+                onOpen={openChat}
+                onNew={newChat}
+                onDelete={handleDeleteChat}
+                error={chatsError}
+              />
+            </fieldset>
+          </div>
           {/* the chat stays in memory while you look at the metrics */}
           <Chat
             messages={messages}

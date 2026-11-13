@@ -15,3 +15,7 @@ azure-storage-blob==12.31.1
 google-auth==2.62.0
 requests==2.34.2
 itsdangerous==2.2.0
+
+# saved chats in PostgreSQL (Neon)
+psycopg[binary]==3.3.9
+psycopg-pool==3.3.3

@@ -7,6 +7,17 @@ $ErrorActionPreference = "Stop"
 $app = "support-rag"
 $group = "support-rag-rg"
 
+# Run Azure CLI's own Python directly instead of az.cmd: a .cmd file mangles
+# characters like & and ? (found in database URLs); this way every value
+# reaches Azure exactly as written.
+$azPython = Join-Path (Split-Path (Get-Command az).Source) "..\python.exe"
+function Invoke-Az { & $azPython -IBm azure.cli @args }
+
+# only double quotes and spaces can't be passed safely as one argument
+function Assert-Passable($name, $value) {
+    if ($value -match '[\s"]') { throw "$name contains spaces or double quotes; remove them from .env." }
+}
+
 # read KEY=VALUE lines from .env (skipping comments and blank lines)
 $envFile = Join-Path $PSScriptRoot "..\.env"
 $values = @{}
@@ -24,8 +35,8 @@ if ($values["SESSION_SECRET"].Length -lt 32) {
     throw "SESSION_SECRET must be at least 32 characters (see .env.example)."
 }
 $values["ALLOWED_EMAILS"] = $values["ALLOWED_EMAILS"] -replace '\s', ''
-if (-not $values["GEMINI_API_KEY"]) {
-    throw "GEMINI_API_KEY is missing from .env."
+foreach ($name in "GEMINI_API_KEY", "DATABASE_URL") {
+    if (-not $values[$name]) { throw "$name is missing from .env." }
 }
 
 # environment variable -> secret name in Azure (secret names must be lowercase)
@@ -34,6 +45,7 @@ $secretNames = [ordered]@{
     SESSION_SECRET      = "session-secret"
     LANGFUSE_PUBLIC_KEY = "langfuse-public-key"
     LANGFUSE_SECRET_KEY = "langfuse-secret-key"
+    DATABASE_URL        = "database-url"
 }
 $secrets = @()
 $envVars = @()
@@ -41,10 +53,7 @@ $saved = @()
 foreach ($name in $secretNames.Keys) {
     $value = $values[$name]
     if (-not $value) { continue }  # e.g. no Langfuse keys: tracing just stays off
-    # az is a .cmd script, so characters like & ^ % " would be mangled
-    if ($value -notmatch '^[A-Za-z0-9_.:/+=-]+$') {
-        throw "$name contains characters that can't be passed safely. Use only letters, digits and - _ . : / + ="
-    }
+    Assert-Passable $name $value
     $secrets += "$($secretNames[$name])=$value"
     $envVars += "$name=secretref:$($secretNames[$name])"
     $saved += $secretNames[$name]
@@ -55,9 +64,7 @@ foreach ($name in "LANGFUSE_BASE_URL", "GENERATION_MODEL", "FALLBACK_MODEL", "MI
                   "GOOGLE_CLIENT_ID", "ALLOWED_EMAILS", "DAILY_QUESTION_LIMIT") {
     $value = $values[$name]
     if (-not $value) { continue }
-    if ($value -notmatch '^[A-Za-z0-9_.:/+=@,-]+$') {
-        throw "$name contains characters that can't be passed safely."
-    }
+    Assert-Passable $name $value
     $envVars += "$name=$value"
 }
 # the live site: HTTPS-only cookies, and never start without sign-in
@@ -67,11 +74,11 @@ $envVars += "REQUIRE_LOGIN=true"
 $envVars += "LANGFUSE_TRACING_ENVIRONMENT=production"
 
 Write-Host "Saving $($secrets.Count) secrets to $app..."
-az containerapp secret set --name $app --resource-group $group --secrets @secrets --output none
+Invoke-Az containerapp secret set --name $app --resource-group $group --secrets @secrets --output none
 if ($LASTEXITCODE -ne 0) { throw "Saving the secrets failed." }
 
 Write-Host "Connecting them to the app's environment variables..."
-az containerapp update --name $app --resource-group $group --set-env-vars @envVars --output none
+Invoke-Az containerapp update --name $app --resource-group $group --set-env-vars @envVars --output none
 if ($LASTEXITCODE -ne 0) { throw "Updating the app failed." }
 
 Write-Host "Done. Secrets set:" ($saved -join ", ")

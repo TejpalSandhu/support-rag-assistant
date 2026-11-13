@@ -15,7 +15,10 @@ when GOOGLE_CLIENT_ID is set; see auth.py):
     GET    /api/documents           uploaded PDFs, chunk counts and status
     POST   /api/documents           upload a PDF (indexed in the background)
     DELETE /api/documents/{name}    remove a PDF and its chunks
-    POST   /api/ask                 ask a question about the documents
+    POST   /api/ask                 ask a question (saved in a chat)
+    GET    /api/chats               your saved chats, newest first
+    GET    /api/chats/{id}          one chat's messages
+    DELETE /api/chats/{id}          delete a chat
     POST   /api/feedback            👍/👎 on an answer (saved in Langfuse)
     GET    /api/metrics?days=7      usage numbers for the metrics page
 """
@@ -25,7 +28,7 @@ import re
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -45,6 +48,7 @@ from pydantic import BaseModel, Field
 
 import auth
 import metrics
+import store as chat_store
 import rag_assistant as rag
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024    # 25 MB
@@ -65,9 +69,9 @@ class Services:
     # (owner, file name) -> "processing" or "failed: <reason>"; finished files drop out
     jobs: dict[tuple[str, str], str] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
-    # (email, UTC date) -> questions asked that day. Kept in memory for now,
-    # so it resets when the server restarts; moves to the database later.
-    questions_today: dict[tuple[str, str], int] = field(default_factory=dict)
+    # saved chats and the daily counter: Neon PostgreSQL when DATABASE_URL is
+    # set, otherwise in memory (tests, local runs)
+    store: Any = field(default_factory=chat_store.MemoryStore)
 
 
 def create_services() -> Services:
@@ -84,6 +88,7 @@ def create_services() -> Services:
         collection=collection,
         pdf_dir=rag.PDF_DIR,
         tracing=rag.tracing_configured(),
+        store=chat_store.make_store(os.getenv("DATABASE_URL")),
     )
 
 
@@ -104,12 +109,13 @@ def daily_question_limit() -> int:
     return int(os.getenv("DAILY_QUESTION_LIMIT") or 20)
 
 
-def today_key(user: auth.User) -> tuple[str, str]:
-    return (user.email, datetime.now(timezone.utc).date().isoformat())
+def today() -> date:
+    return datetime.now(timezone.utc).date()
 
 
 def questions_left(services: Services, user: auth.User) -> int:
-    return max(daily_question_limit() - services.questions_today.get(today_key(user), 0), 0)
+    used = services.store.questions_used(user.email, today())
+    return max(daily_question_limit() - used, 0)
 
 
 # --- Request and response shapes ---
@@ -122,6 +128,8 @@ class DocumentInfo(BaseModel):
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    # continue this chat; leave out to start a new one
+    chat_id: str | None = None
 
 
 class Source(BaseModel):
@@ -138,6 +146,20 @@ class AskResponse(BaseModel):
     sources: list[Source]
     trace_id: str | None
     trace_url: str | None
+    chat_id: str
+
+
+class ChatSummary(BaseModel):
+    id: str
+    title: str
+    updated_at: datetime
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+    # for answers: covered, best_score, sources, trace_id, trace_url
+    details: dict[str, Any] | None
 
 
 class Me(BaseModel):
@@ -283,6 +305,8 @@ def ask(body: AskRequest, services: ServicesDep, user: UserDep) -> AskResponse:
     question = body.question.strip()
     if not question:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "The question is empty.")
+    if body.chat_id and not services.store.chat_exists(user.email, body.chat_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat not found.")
     if questions_left(services, user) == 0:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
@@ -312,11 +336,9 @@ def ask(body: AskRequest, services: ServicesDep, user: UserDep) -> AskResponse:
         raise
 
     # only questions that got an answer or a refusal count (not model errors)
-    with services.lock:
-        key = today_key(user)
-        services.questions_today[key] = services.questions_today.get(key, 0) + 1
+    services.store.count_question(user.email, today())
 
-    return AskResponse(
+    response = AskResponse(
         answer=result["answer"],
         covered=result["covered"],
         best_score=result["best_score"],
@@ -326,7 +348,31 @@ def ask(body: AskRequest, services: ServicesDep, user: UserDep) -> AskResponse:
         ],
         trace_id=result["trace_id"],
         trace_url=result["trace_url"],
+        chat_id=body.chat_id or services.store.create_chat(user.email, chat_store.make_title(question)),
     )
+    # everything the website needs to show the answer again later
+    details = response.model_dump(include={"covered", "best_score", "sources", "trace_id", "trace_url"})
+    services.store.add_exchange(user.email, response.chat_id, question, response.answer, details)
+    return response
+
+
+@protected.get("/chats", response_model=list[ChatSummary])
+def list_chats(services: ServicesDep, user: UserDep) -> list[ChatSummary]:
+    return [ChatSummary(**chat) for chat in services.store.list_chats(user.email)]
+
+
+@protected.get("/chats/{chat_id}", response_model=list[ChatMessage])
+def get_chat(chat_id: str, services: ServicesDep, user: UserDep) -> list[ChatMessage]:
+    messages = services.store.get_messages(user.email, chat_id)
+    if messages is None:  # someone else's chat looks exactly like a missing one
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat not found.")
+    return [ChatMessage(**message) for message in messages]
+
+
+@protected.delete("/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_chat(chat_id: str, services: ServicesDep, user: UserDep) -> None:
+    if not services.store.delete_chat(user.email, chat_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat not found.")
 
 
 def require_tracing(services: Services) -> None:
@@ -374,6 +420,7 @@ def create_app(services: Services | None = None) -> FastAPI:
         app.state.services = services or create_services()
         yield
         app.state.services.langfuse.flush()
+        app.state.services.store.close()
 
     app = FastAPI(title="Support RAG Assistant", lifespan=lifespan)
     auth.add_sessions(app)

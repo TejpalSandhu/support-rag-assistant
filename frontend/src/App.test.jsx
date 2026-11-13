@@ -16,7 +16,12 @@ const USER = {
 
 function fakeBackend(routes) {
   // signed in, unless a test says otherwise
-  routes = { 'GET /api/me': [[200, USER]], 'POST /api/auth/logout': [[204, null]], ...routes }
+  routes = {
+    'GET /api/me': [[200, USER]],
+    'POST /api/auth/logout': [[204, null]],
+    'GET /api/chats': [[200, []]],
+    ...routes,
+  }
   const calls = []
   const fetchMock = vi.fn(async (url, options = {}) => {
     const method = options.method || 'GET'
@@ -257,5 +262,74 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: '30 days' }))
     expect(await screen.findByText('40')).toBeInTheDocument()
     expect(calls.at(-1).key).toBe('GET /api/metrics?days=30')
+  })
+
+  it('saves the first question as a new chat and reopens it after a refresh', async () => {
+    const chat = { id: 'chat-1', title: 'How do I load filament?', updated_at: new Date().toISOString() }
+    const calls = fakeBackend({
+      'GET /api/documents': [[200, [READY_DOC]]],
+      'POST /api/ask': [[200, { ...COVERED_ANSWER, chat_id: 'chat-1' }]],
+      'GET /api/chats': [[200, []], [200, [chat]]],
+      'GET /api/chats/chat-1': [[200, [
+        { role: 'user', content: 'How do I load filament?', details: null },
+        { role: 'assistant', content: COVERED_ANSWER.answer, details: { ...COVERED_ANSWER, answer: undefined } },
+      ]]],
+    })
+    const user = userEvent.setup()
+    const { unmount } = render(<App />)
+    await screen.findByText('manual.pdf')
+    await ask(user, 'How do I load filament?')
+
+    // the new chat shows up in the list
+    expect(await screen.findByRole('button', { name: /^How do I load filament\?/ })).toBeInTheDocument()
+    expect(JSON.parse(calls.find((c) => c.key === 'POST /api/ask').body)).toEqual({
+      question: 'How do I load filament?',
+      chat_id: null,
+    })
+
+    // "refresh": the page starts again and reopens the same chat
+    unmount()
+    render(<App />)
+    expect(await screen.findByText('PTFE tube')).toBeInTheDocument()
+    expect(calls.at(-1).key).toBe('GET /api/chats/chat-1')
+  })
+
+  it('sends follow-up questions to the open chat', async () => {
+    const chat = { id: 'chat-7', title: 'Old chat', updated_at: new Date().toISOString() }
+    const calls = fakeBackend({
+      'GET /api/documents': [[200, [READY_DOC]]],
+      'GET /api/chats': [[200, [chat]]],
+      'GET /api/chats/chat-7': [[200, [{ role: 'user', content: 'Earlier question', details: null }]]],
+      'POST /api/ask': [[200, { ...COVERED_ANSWER, chat_id: 'chat-7' }]],
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /^Old chat/ }))
+    expect(await screen.findByText('Earlier question')).toBeInTheDocument()
+    await ask(user, 'And then?')
+
+    const sent = JSON.parse(calls.find((c) => c.key === 'POST /api/ask').body)
+    expect(sent).toEqual({ question: 'And then?', chat_id: 'chat-7' })
+  })
+
+  it('deletes a chat and starts a new one', async () => {
+    const chat = { id: 'chat-9', title: 'Remove me', updated_at: new Date().toISOString() }
+    const calls = fakeBackend({
+      'GET /api/documents': [[200, [READY_DOC]]],
+      'GET /api/chats': [[200, [chat]], [200, [chat]], [200, []]],
+      'GET /api/chats/chat-9': [[200, [{ role: 'user', content: 'Old question', details: null }]]],
+      'DELETE /api/chats/chat-9': [[204, null]],
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /^Remove me/ }))
+    await screen.findByText('Old question')
+    await user.click(screen.getByRole('button', { name: 'Delete chat: Remove me' }))
+
+    await waitFor(() => expect(screen.queryByText('Old question')).not.toBeInTheDocument())
+    expect(calls.some((c) => c.key === 'DELETE /api/chats/chat-9')).toBe(true)
   })
 })

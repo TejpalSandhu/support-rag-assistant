@@ -55,7 +55,12 @@ export const api = {
   deleteDocument: (name) =>
     request(`/documents/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
-  ask: (question) => postJson('/ask', { question }),
+  // chatId: continue that chat; null starts a new one
+  ask: (question, chatId) => postJson('/ask', { question, chat_id: chatId || null }),
+
+  listChats: () => request('/chats'),
+  getChat: (chatId) => request(`/chats/${encodeURIComponent(chatId)}`),
+  deleteChat: (chatId) => request(`/chats/${encodeURIComponent(chatId)}`, { method: 'DELETE' }),
 
   sendFeedback: (traceId, helpful) => postJson('/feedback', { trace_id: traceId, helpful }),
 

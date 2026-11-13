@@ -205,6 +205,21 @@ owner, who receives anything uploaded before accounts existed. The website
 uses its own Chroma collection, separate from the manuals used by the CLI and
 the evaluation scripts.
 
+**Chats are saved** in PostgreSQL (a free [Neon](https://neon.com) database),
+so they survive refreshes and work across devices:
+
+```
+chats        id | owner | title | created_at | updated_at
+messages     id | chat_id -> chats | role | content | details (sources, score, trace) | created_at
+daily_usage  owner | day | questions
+```
+
+Every query filters by owner, so a guessed chat ID from someone else just
+returns "not found". A question and its answer are saved in one transaction,
+and the daily counter is a single `INSERT ... ON CONFLICT DO UPDATE`, so two
+questions at once can't lose a count. The tests run the same store tests
+against an in-memory store and a real PostgreSQL (a throwaway one in CI).
+
 Each person gets `DAILY_QUESTION_LIMIT` questions a day (default 20), so one
 user can't use up the shared free Gemini quota. The live site runs with
 `REQUIRE_LOGIN=true`: if the Google settings are ever missing, it refuses to
@@ -219,10 +234,13 @@ development) login is off.
 | `POST /api/auth/google` | Sign in with a Google ID token; sets the session cookie |
 | `POST /api/auth/logout` | Sign out |
 | `GET /api/me` | Who is signed in, and questions left today |
+| `GET /api/chats` | Your saved chats, newest first |
+| `GET /api/chats/{id}` | One chat's questions and answers |
+| `DELETE /api/chats/{id}` | Delete a chat |
 | `GET /api/documents` | Uploaded PDFs with chunk counts and status |
 | `POST /api/documents` | Upload a PDF; it's indexed in the background |
 | `DELETE /api/documents/{name}` | Remove a PDF and its chunks |
-| `POST /api/ask` | `{"question": "..."}` -> answer, sources, score, trace link |
+| `POST /api/ask` | `{"question": "...", "chat_id": "..."}` -> answer, sources, score, trace link, chat ID |
 | `POST /api/feedback` | `{"trace_id": "...", "helpful": true}`: a 👍/👎 saved as a Langfuse score |
 | `GET /api/metrics?days=7` | Questions, answered/refused/failed, response time, 👍 rate |
 
@@ -244,6 +262,7 @@ reached, and resumes where it left off on the next run.
 rag_assistant.py       the assistant: ingest, embed, store, retrieve, refuse, answer, trace
 api.py                 web API (FastAPI) around rag_assistant.py
 auth.py                sign in with Google, email allowlist, session cookie
+store.py               saved chats and the daily counter (PostgreSQL, or memory)
 metrics.py             numbers for the metrics page, from Langfuse's Metrics API
 tests/                 automated API tests with a fake Gemini client (pytest)
 frontend/              React website: upload PDFs, chat with sources (Vite, Vitest)
@@ -295,4 +314,4 @@ experiments.md         experiment log: every change with before/after numbers
 
 Python 3.12 · Google Gemini (`google-genai`: embeddings and generation) ·
 Chroma (vector database) · Langfuse (tracing) · pypdf ·
-FastAPI · React (Vite) · Docker · GitHub Actions · Azure Container Apps and Blob Storage
+FastAPI · PostgreSQL (Neon) · React (Vite) · Docker · GitHub Actions · Azure Container Apps and Blob Storage
