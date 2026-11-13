@@ -5,7 +5,18 @@ import App from './App'
 
 // A fake backend: `routes` maps "METHOD /path" to a list of replies,
 // used in order (the last one repeats). Every request is recorded.
+const USER = {
+  email: 'friend@gmail.com',
+  name: 'Friend',
+  picture: '',
+  login_enabled: true,
+  questions_left_today: 20,
+  daily_question_limit: 20,
+}
+
 function fakeBackend(routes) {
+  // signed in, unless a test says otherwise
+  routes = { 'GET /api/me': [[200, USER]], 'POST /api/auth/logout': [[204, null]], ...routes }
   const calls = []
   const fetchMock = vi.fn(async (url, options = {}) => {
     const method = options.method || 'GET'
@@ -56,18 +67,55 @@ describe('App', () => {
     vi.unstubAllGlobals()
   })
 
-  it('asks for the access key on 401 and sends it afterwards', async () => {
+  it('shows Google sign-in when not signed in, then the app after signing in', async () => {
     const calls = fakeBackend({
-      'GET /api/documents': [[401, { detail: 'Missing or wrong access key.' }], [200, []]],
+      'GET /api/me': [[401, { detail: 'Please sign in.' }], [200, USER]],
+      'GET /api/auth/config': [[200, { google_client_id: 'test-client' }]],
+      'POST /api/auth/google': [[200, USER]],
+      'GET /api/documents': [[200, []]],
     })
+    // a stand-in for Google's library: its "button" signs in straight away
+    const google = { initialize: vi.fn(), renderButton: vi.fn(), disableAutoSelect: vi.fn() }
+    google.renderButton.mockImplementation((slot) => {
+      const button = document.createElement('button')
+      button.textContent = 'Sign in with Google'
+      button.onclick = () => google.initialize.mock.calls[0][0].callback({ credential: 'google-token' })
+      slot.appendChild(button)
+    })
+    vi.stubGlobal('google', { accounts: { id: google } })
     const user = userEvent.setup()
     render(<App />)
 
-    await user.type(await screen.findByLabelText('Access key'), 'my-key')
-    await user.click(screen.getByRole('button', { name: 'Continue' }))
+    await user.click(await screen.findByRole('button', { name: 'Sign in with Google' }))
 
-    expect(await screen.findByText(/No documents yet/)).toBeInTheDocument()
-    expect(calls.at(-1).headers['X-API-Key']).toBe('my-key')
+    expect(await screen.findByText('friend@gmail.com')).toBeInTheDocument()
+    expect(screen.getByText('20 of 20 questions left today')).toBeInTheDocument()
+    expect(google.initialize.mock.calls[0][0].client_id).toBe('test-client')
+    const login = calls.find((call) => call.key === 'POST /api/auth/google')
+    expect(JSON.parse(login.body)).toEqual({ credential: 'google-token' })
+  })
+
+  it('explains when an email is not on the access list', async () => {
+    fakeBackend({
+      'GET /api/me': [[403, { detail: 'stranger@gmail.com no longer has access.' }]],
+      'GET /api/auth/config': [[200, { google_client_id: 'test-client' }]],
+    })
+    vi.stubGlobal('google', { accounts: { id: { initialize: vi.fn(), renderButton: vi.fn() } } })
+    render(<App />)
+
+    expect(await screen.findByText('stranger@gmail.com no longer has access.')).toBeInTheDocument()
+  })
+
+  it('signs out', async () => {
+    const calls = fakeBackend({ 'GET /api/documents': [[200, []]], 'GET /api/auth/config': [[200, { google_client_id: 'x' }]] })
+    vi.stubGlobal('google', { accounts: { id: { initialize: vi.fn(), renderButton: vi.fn(), disableAutoSelect: vi.fn() } } })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: 'Sign out' }))
+
+    expect(await screen.findByText(/Sign in with the Google account/)).toBeInTheDocument()
+    expect(calls.some((call) => call.key === 'POST /api/auth/logout')).toBe(true)
   })
 
   it('lists documents with their status and failure reason', async () => {

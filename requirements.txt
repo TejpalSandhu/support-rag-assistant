@@ -10,3 +10,8 @@ fastapi==0.162.5
 uvicorn==0.54.0
 python-multipart==0.0.33
 azure-storage-blob==12.31.1
+
+# sign in with Google: check Google's ID tokens, keep a signed session cookie
+google-auth==2.62.0
+requests==2.34.2
+itsdangerous==2.2.0

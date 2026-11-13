@@ -160,8 +160,8 @@ docker compose down            # stop
 Two containers start: `backend` (FastAPI, Python 3.12) and `frontend` (the
 built React site served by nginx, which forwards `/api` to the backend).
 Settings come from `.env`; your `pdfs/` and `chroma_db/` folders are mounted
-into the backend, so nothing is embedded twice. Set `APP_ACCESS_KEY` before
-putting it anywhere public.
+into the backend, so nothing is embedded twice. Set up Google sign-in (below)
+before putting it anywhere public.
 
 ### Live on Azure (automatic deploy)
 
@@ -176,7 +176,7 @@ logs in to Azure with OIDC, so no Azure password is stored anywhere.
   indexed, its chunks and vectors are backed up as JSON to Azure Blob Storage,
   and a fresh container rebuilds the index from those backups at startup,
   without calling Gemini again.
-- **Secrets** (Gemini, Langfuse, the site password) are Azure secrets, copied
+- **Secrets** (Gemini, Langfuse, the session secret) are Azure secrets, copied
   from `.env` by `deploy/set-azure-secrets.ps1`.
 - **Threshold for any PDF:** `MIN_SCORE` was tuned to 0.631 on the two
   manuals, but broad questions about other PDFs score lower (a real question
@@ -185,11 +185,31 @@ logs in to Azure with OIDC, so no Azure password is stored anywhere.
   question still passes and the prompt refuses the off-topic ones that get
   through, while clearly unrelated questions (0.46-0.52) never reach the model.
 
+### Sign in with Google
+
+Only people on an email allowlist can use the site:
+
+1. The website shows Google's sign-in button; Google gives the browser a
+   signed ID token for the chosen account.
+2. The backend checks Google's signature, that the token is for this app,
+   and that the email is in `ALLOWED_EMAILS`.
+3. It then sets a signed, HttpOnly, SameSite session cookie for 7 days.
+   Removing an email from the list locks that person out on their next request.
+
+Each person gets `DAILY_QUESTION_LIMIT` questions a day (default 20), so one
+user can't use up the shared free Gemini quota. The live site runs with
+`REQUIRE_LOGIN=true`: if the Google settings are ever missing, it refuses to
+start rather than run open to everyone. Without `GOOGLE_CLIENT_ID` (local
+development) login is off.
+
 ### Web API
 
 | Endpoint | What it does |
 |---|---|
-| `GET /api/health` | Is the server up? (no key needed) |
+| `GET /api/health` | Is the server up? (no login needed) |
+| `POST /api/auth/google` | Sign in with a Google ID token; sets the session cookie |
+| `POST /api/auth/logout` | Sign out |
+| `GET /api/me` | Who is signed in, and questions left today |
 | `GET /api/documents` | Uploaded PDFs with chunk counts and status |
 | `POST /api/documents` | Upload a PDF; it's indexed in the background |
 | `DELETE /api/documents/{name}` | Remove a PDF and its chunks |
@@ -197,9 +217,9 @@ logs in to Azure with OIDC, so no Azure password is stored anywhere.
 | `POST /api/feedback` | `{"trace_id": "...", "helpful": true}`: a 👍/👎 saved as a Langfuse score |
 | `GET /api/metrics?days=7` | Questions, answered/refused/failed, response time, 👍 rate |
 
-If `APP_ACCESS_KEY` is set in `.env`, every endpoint except health needs the
-header `X-API-Key: <your key>`. The tests use a fake Gemini client, so they
-are free, fast, and never touch your API quota.
+With sign-in on, every endpoint except health and `/api/auth/...` needs the
+session cookie. The tests use a fake Gemini client and a fake Google check, so
+they are free, fast, and never touch your API quota.
 
 On the Gemini free tier, every embedded text counts toward a limit of
 roughly 100 per minute and 1,000 per day, and answers are limited to about
@@ -213,7 +233,8 @@ reached, and resumes where it left off on the next run.
 
 ```
 rag_assistant.py       the assistant: ingest, embed, store, retrieve, refuse, answer, trace
-api.py                 web API (FastAPI) around rag_assistant.py, with an access key
+api.py                 web API (FastAPI) around rag_assistant.py
+auth.py                sign in with Google, email allowlist, session cookie
 metrics.py             numbers for the metrics page, from Langfuse's Metrics API
 tests/                 automated API tests with a fake Gemini client (pytest)
 frontend/              React website: upload PDFs, chat with sources (Vite, Vitest)

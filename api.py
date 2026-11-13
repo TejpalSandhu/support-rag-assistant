@@ -5,9 +5,13 @@ Run locally:
     uvicorn api:app --reload
 then open http://127.0.0.1:8000/docs to try every endpoint in the browser.
 
-Endpoints (everything except /api/health needs the X-API-Key header when
-APP_ACCESS_KEY is set in .env):
+Endpoints (everything except health and /api/auth/... needs a signed-in user
+when GOOGLE_CLIENT_ID is set; see auth.py):
     GET    /api/health              is the server up?
+    GET    /api/auth/config         Google client ID for the sign-in button
+    POST   /api/auth/google         sign in with a Google ID token
+    POST   /api/auth/logout         sign out
+    GET    /api/me                  who is signed in, questions left today
     GET    /api/documents           uploaded PDFs, chunk counts and status
     POST   /api/documents           upload a PDF (indexed in the background)
     DELETE /api/documents/{name}    remove a PDF and its chunks
@@ -18,10 +22,10 @@ APP_ACCESS_KEY is set in .env):
 
 import os
 import re
-import secrets
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -33,14 +37,13 @@ from fastapi import (
     FastAPI,
     HTTPException,
     Request,
-    Security,
     UploadFile,
     status,
 )
-from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import auth
 import metrics
 import rag_assistant as rag
 
@@ -62,6 +65,9 @@ class Services:
     # file name -> "processing" or "failed: <reason>"; finished files drop out
     jobs: dict[str, str] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # (email, UTC date) -> questions asked that day. Kept in memory for now,
+    # so it resets when the server restarts; moves to the database later.
+    questions_today: dict[tuple[str, str], int] = field(default_factory=dict)
 
 
 def create_services() -> Services:
@@ -87,19 +93,22 @@ def get_services(request: Request) -> Services:
 ServicesDep = Annotated[Services, Depends(get_services)]
 
 
-# --- Access key ---
+# --- Signed-in user and daily limit ---
 
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+UserDep = Annotated[auth.User, Depends(auth.current_user)]
 
 
-def require_access_key(key: Annotated[str | None, Security(api_key_header)]) -> None:
-    expected = os.getenv("APP_ACCESS_KEY")
-    if not expected:
-        return  # no key configured: local development
-    # compare_digest takes the same time for every wrong key, so the key
-    # can't be guessed character by character from response times
-    if not key or not secrets.compare_digest(key.encode(), expected.encode()):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing or wrong access key.")
+def daily_question_limit() -> int:
+    # each user's share of the free Gemini answers (~40/day for everyone)
+    return int(os.getenv("DAILY_QUESTION_LIMIT") or 20)
+
+
+def today_key(user: auth.User) -> tuple[str, str]:
+    return (user.email, datetime.now(timezone.utc).date().isoformat())
+
+
+def questions_left(services: Services, user: auth.User) -> int:
+    return max(daily_question_limit() - services.questions_today.get(today_key(user), 0), 0)
 
 
 # --- Request and response shapes ---
@@ -128,6 +137,15 @@ class AskResponse(BaseModel):
     sources: list[Source]
     trace_id: str | None
     trace_url: str | None
+
+
+class Me(BaseModel):
+    email: str
+    name: str
+    picture: str
+    login_enabled: bool
+    questions_left_today: int
+    daily_question_limit: int
 
 
 class FeedbackRequest(BaseModel):
@@ -177,12 +195,24 @@ def index_in_background(services: Services, name: str) -> None:
 # --- Endpoints ---
 
 public = APIRouter(prefix="/api")
-protected = APIRouter(prefix="/api", dependencies=[Depends(require_access_key)])
+protected = APIRouter(prefix="/api", dependencies=[Depends(auth.current_user)])
 
 
 @public.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@protected.get("/me", response_model=Me)
+def me(user: UserDep, services: ServicesDep) -> Me:
+    return Me(
+        email=user.email,
+        name=user.name,
+        picture=user.picture,
+        login_enabled=auth.login_enabled(),
+        questions_left_today=questions_left(services, user),
+        daily_question_limit=daily_question_limit(),
+    )
 
 
 @protected.get("/documents", response_model=list[DocumentInfo])
@@ -238,10 +268,16 @@ def delete_document(name: str, services: ServicesDep) -> None:
 
 
 @protected.post("/ask", response_model=AskResponse)
-def ask(body: AskRequest, services: ServicesDep) -> AskResponse:
+def ask(body: AskRequest, services: ServicesDep, user: UserDep) -> AskResponse:
     question = body.question.strip()
     if not question:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "The question is empty.")
+    if questions_left(services, user) == 0:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"You've used your {daily_question_limit()} questions for today. "
+            "The limit resets at midnight UTC.",
+        )
 
     try:
         result = rag.ask(question, services.collection, services.client, services.langfuse)
@@ -261,6 +297,11 @@ def ask(body: AskRequest, services: ServicesDep) -> AskResponse:
                 "The AI models are busy right now. Please try again in a minute.",
             )
         raise
+
+    # only questions that got an answer or a refusal count (not model errors)
+    with services.lock:
+        key = today_key(user)
+        services.questions_today[key] = services.questions_today.get(key, 0) + 1
 
     return AskResponse(
         answer=result["answer"],
@@ -322,7 +363,9 @@ def create_app(services: Services | None = None) -> FastAPI:
         app.state.services.langfuse.flush()
 
     app = FastAPI(title="Support RAG Assistant", lifespan=lifespan)
+    auth.add_sessions(app)
     app.include_router(public)
+    app.include_router(auth.router)
     app.include_router(protected)
 
     # on Azure there's no nginx: the backend also serves the built website.

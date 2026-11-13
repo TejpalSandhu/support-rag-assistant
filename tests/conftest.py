@@ -72,7 +72,10 @@ def fake_gemini():
 
 @pytest.fixture
 def services(tmp_path, fake_gemini, monkeypatch):
-    monkeypatch.delenv("APP_ACCESS_KEY", raising=False)
+    # login off by default (tests in test_auth.py switch it on)
+    for name in ("GOOGLE_CLIENT_ID", "SESSION_SECRET", "ALLOWED_EMAILS",
+                 "COOKIE_SECURE", "DAILY_QUESTION_LIMIT", "REQUIRE_LOGIN"):
+        monkeypatch.delenv(name, raising=False)
     # backups go to a temp folder, never to real Azure storage
     monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING", raising=False)
     monkeypatch.setattr(rag.time, "sleep", lambda seconds: None)  # no real waiting

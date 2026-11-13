@@ -1,23 +1,5 @@
 // Everything that talks to the backend lives here.
 
-const KEY_STORAGE = 'support-rag-access-key'
-
-export function getAccessKey() {
-  try {
-    return localStorage.getItem(KEY_STORAGE) || ''
-  } catch {
-    return '' // storage blocked (e.g. private browsing)
-  }
-}
-
-export function setAccessKey(key) {
-  try {
-    localStorage.setItem(KEY_STORAGE, key)
-  } catch {
-    // storage blocked: the key just won't be remembered
-  }
-}
-
 export class ApiError extends Error {
   constructor(status, message) {
     super(message)
@@ -33,14 +15,11 @@ function errorMessage(body, status) {
   return `Request failed (${status})`
 }
 
+// the session cookie from signing in goes along automatically (same site)
 async function request(path, options = {}) {
-  const headers = { ...options.headers }
-  const key = getAccessKey()
-  if (key) headers['X-API-Key'] = key
-
   let response
   try {
-    response = await fetch(`/api${path}`, { ...options, headers })
+    response = await fetch(`/api${path}`, options)
   } catch {
     throw new ApiError(0, 'Cannot reach the server. Is the backend running?')
   }
@@ -51,7 +30,20 @@ async function request(path, options = {}) {
   return body
 }
 
+function postJson(path, body) {
+  return request(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
 export const api = {
+  getAuthConfig: () => request('/auth/config'),
+  signInWithGoogle: (credential) => postJson('/auth/google', { credential }),
+  signOut: () => request('/auth/logout', { method: 'POST' }),
+  me: () => request('/me'),
+
   listDocuments: () => request('/documents'),
 
   uploadDocument: (file) => {
@@ -63,19 +55,9 @@ export const api = {
   deleteDocument: (name) =>
     request(`/documents/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
-  ask: (question) =>
-    request('/ask', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
-    }),
+  ask: (question) => postJson('/ask', { question }),
 
-  sendFeedback: (traceId, helpful) =>
-    request('/feedback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ trace_id: traceId, helpful }),
-    }),
+  sendFeedback: (traceId, helpful) => postJson('/feedback', { trace_id: traceId, helpful }),
 
   getMetrics: (days) => request(`/metrics?days=${days}`),
 }

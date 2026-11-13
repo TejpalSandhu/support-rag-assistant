@@ -19,18 +19,10 @@ def upload(client, name, data):
     return client.post("/api/documents", files={"file": (name, data, "application/pdf")})
 
 
-# --- Health and access key ---
+# --- Health ---
 
-def test_health_needs_no_key(client, monkeypatch):
-    monkeypatch.setenv("APP_ACCESS_KEY", "secret-123")
+def test_health(client):
     assert client.get("/api/health").json() == {"status": "ok"}
-
-
-def test_protected_endpoints_need_the_right_key(client, monkeypatch):
-    monkeypatch.setenv("APP_ACCESS_KEY", "secret-123")
-    assert client.get("/api/documents").status_code == 401
-    assert client.get("/api/documents", headers={"X-API-Key": "wrong"}).status_code == 401
-    assert client.get("/api/documents", headers={"X-API-Key": "secret-123"}).status_code == 200
 
 
 def test_backend_can_serve_the_website(services, monkeypatch, tmp_path):

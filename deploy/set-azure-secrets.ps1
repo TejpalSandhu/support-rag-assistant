@@ -16,10 +16,14 @@ foreach ($line in Get-Content $envFile) {
     }
 }
 
-# the public site must be password protected, or anyone could use your Gemini key
-if (-not $values["APP_ACCESS_KEY"]) {
-    throw "Set APP_ACCESS_KEY in .env first (this is the password for the website)."
+# the public site needs Google sign-in, or anyone could use your Gemini key
+foreach ($name in "GOOGLE_CLIENT_ID", "SESSION_SECRET", "ALLOWED_EMAILS") {
+    if (-not $values[$name]) { throw "Set $name in .env first (see .env.example)." }
 }
+if ($values["SESSION_SECRET"].Length -lt 32) {
+    throw "SESSION_SECRET must be at least 32 characters (see .env.example)."
+}
+$values["ALLOWED_EMAILS"] = $values["ALLOWED_EMAILS"] -replace '\s', ''
 if (-not $values["GEMINI_API_KEY"]) {
     throw "GEMINI_API_KEY is missing from .env."
 }
@@ -27,7 +31,7 @@ if (-not $values["GEMINI_API_KEY"]) {
 # environment variable -> secret name in Azure (secret names must be lowercase)
 $secretNames = [ordered]@{
     GEMINI_API_KEY      = "gemini-api-key"
-    APP_ACCESS_KEY      = "app-access-key"
+    SESSION_SECRET      = "session-secret"
     LANGFUSE_PUBLIC_KEY = "langfuse-public-key"
     LANGFUSE_SECRET_KEY = "langfuse-secret-key"
 }
@@ -47,9 +51,18 @@ foreach ($name in $secretNames.Keys) {
 }
 
 # settings that aren't secret
-foreach ($name in "LANGFUSE_BASE_URL", "GENERATION_MODEL", "FALLBACK_MODEL", "MIN_SCORE") {
-    if ($values[$name]) { $envVars += "$name=$($values[$name])" }
+foreach ($name in "LANGFUSE_BASE_URL", "GENERATION_MODEL", "FALLBACK_MODEL", "MIN_SCORE",
+                  "GOOGLE_CLIENT_ID", "ALLOWED_EMAILS", "DAILY_QUESTION_LIMIT") {
+    $value = $values[$name]
+    if (-not $value) { continue }
+    if ($value -notmatch '^[A-Za-z0-9_.:/+=@,-]+$') {
+        throw "$name contains characters that can't be passed safely."
+    }
+    $envVars += "$name=$value"
 }
+# the live site: HTTPS-only cookies, and never start without sign-in
+$envVars += "COOKIE_SECURE=true"
+$envVars += "REQUIRE_LOGIN=true"
 # live traces are tagged "production", so local tests don't mix into the metrics page
 $envVars += "LANGFUSE_TRACING_ENVIRONMENT=production"
 
