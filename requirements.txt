@@ -4,3 +4,8 @@ python-dotenv==1.2.4
 google-genai==2.31.0
 chromadb==1.5.9
 langfuse==5.0.1
+
+# web API
+fastapi==0.162.5
+uvicorn==0.54.0
+python-multipart==0.0.33

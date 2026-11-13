@@ -27,7 +27,7 @@ from typing import Any
 import chromadb
 from dotenv import load_dotenv
 from google import genai
-from google.genai import errors
+from google.genai import errors, types
 from langfuse import Langfuse, get_client, propagate_attributes
 from pypdf import PdfReader
 
@@ -35,10 +35,15 @@ from pypdf import PdfReader
 # --- Config ---
 
 BASE_DIR = Path(__file__).resolve().parent
-PDF_DIR = BASE_DIR / "pdfs"
-# sorted so chunk order stays the same between runs
-PDF_PATHS = sorted(path for path in PDF_DIR.glob("*.pdf") if path.is_file())
-CHROMA_PATH = BASE_DIR / "chroma_db"
+# read .env first so the settings below can come from it (Docker passes
+# real environment variables instead, which take priority)
+load_dotenv(BASE_DIR / ".env")
+
+# where uploaded PDFs and the vector database live; a container points this
+# at a storage volume so the data survives restarts
+DATA_DIR = Path(os.getenv("DATA_DIR") or BASE_DIR)
+PDF_DIR = DATA_DIR / "pdfs"
+CHROMA_PATH = DATA_DIR / "chroma_db"
 
 CHUNK_SIZE = 100       # words per chunk
 CHUNK_OVERLAP = 20     # words shared between neighbouring chunks
@@ -52,12 +57,14 @@ NOT_COVERED_MESSAGE = (
 )
 
 EMBEDDING_MODEL = "gemini-embedding-001"
-GENERATION_MODEL = "gemini-3.8-flash"
+# changeable without code edits, e.g. when a model is overloaded
+GENERATION_MODEL = os.getenv("GENERATION_MODEL") or "gemini-3.8-flash"
 
 EMBED_BATCH_SIZE = 100
 # retry on 429 / 5xx with doubling waits: 5, 10, 20, 40, 60s
 MAX_RETRIES = 6
-GENERATION_RETRIES = 3   # someone is waiting for the answer: 5s + 10s at most
+# an overloaded model can hang for minutes; give up after this and say so
+GENERATION_TIMEOUT_SECONDS = 30
 INITIAL_WAIT_SECONDS = 5
 MAX_WAIT_SECONDS = 60
 
@@ -70,6 +77,7 @@ def make_gemini_client() -> genai.Client:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY is missing from your .env file")
+    # no SDK-level retries: our code decides when and how long to wait
     return genai.Client(api_key=api_key)
 
 
@@ -174,15 +182,22 @@ def chunk_documents(
     return document_chunks
 
 
+def pdf_paths() -> list[Path]:
+    # looked up on every call so files uploaded through the API are included;
+    # sorted so chunk order stays the same between runs
+    return sorted(path for path in PDF_DIR.glob("*.pdf") if path.is_file())
+
+
 def load_pages() -> list[dict[str, Any]]:
     """Read every PDF in PDF_DIR (slow - pypdf takes over a minute here)."""
-    if not PDF_PATHS:
+    paths = pdf_paths()
+    if not paths:
         raise FileNotFoundError(
             f"No PDF files found in {PDF_DIR}. Add at least one PDF to this folder."
         )
 
     all_pages: list[dict[str, Any]] = []
-    for pdf_path in PDF_PATHS:
+    for pdf_path in paths:
         pages = load_pdf_pages(pdf_path)
         all_pages.extend(pages)
         print(f"Loaded {len(pages)} text pages from {pdf_path.name}")
@@ -329,14 +344,55 @@ def sync_collection(
         collection.delete(ids=list(stale_ids))
         print(f"Removed {len(stale_ids)} outdated chunks.")
 
+    if not add_missing_chunks(collection, chunks, client, stored_ids):
+        print(f"All {len(chunks)} chunks already stored in '{collection.name}'.")
+
+
+def index_pdf(
+    pdf_path: Path,
+    collection: chromadb.Collection,
+    client: genai.Client,
+) -> int:
+    """(Re)index one PDF without touching other files; returns its chunk count."""
+    chunks = chunk_documents(load_pdf_pages(pdf_path))
+    stored_ids = set(collection.get(where={"source": pdf_path.name}, include=[])["ids"])
+
+    # an older upload with the same name
+    stale_ids = stored_ids - set(make_chunk_ids(chunks))
+    if stale_ids:
+        collection.delete(ids=list(stale_ids))
+
+    add_missing_chunks(collection, chunks, client, stored_ids)
+    return len(chunks)
+
+
+def list_documents(collection: chromadb.Collection) -> dict[str, int]:
+    """{file name: number of stored chunks} for every file in the collection."""
+    counts: dict[str, int] = {}
+    for metadata in collection.get(include=["metadatas"])["metadatas"]:
+        counts[metadata["source"]] = counts.get(metadata["source"], 0) + 1
+    return counts
+
+
+def delete_document(collection: chromadb.Collection, source: str) -> None:
+    collection.delete(where={"source": source})
+
+
+def add_missing_chunks(
+    collection: chromadb.Collection,
+    chunks: list[dict[str, Any]],
+    client: genai.Client,
+    stored_ids: set[str],
+) -> int:
+    """Embed and store the chunks whose ID isn't in `stored_ids`; returns how many."""
+    ids = make_chunk_ids(chunks)
     missing = [
         (chunk_id, chunk)
         for chunk_id, chunk in zip(ids, chunks)
         if chunk_id not in stored_ids
     ]
     if not missing:
-        print(f"All {len(chunks)} chunks already stored in '{collection.name}'.")
-        return
+        return 0
 
     print(f"Embedding {len(missing)} new chunks into '{collection.name}'...")
 
@@ -354,6 +410,8 @@ def sync_collection(
             ],
         )
         print(f"  Stored {start + len(batch)} of {len(missing)}")
+
+    return len(missing)
 
 
 # --- Retrieval ---
@@ -389,6 +447,9 @@ def search(
     top_k: int = TOP_K,
 ) -> list[dict[str, Any]]:
     """Like retrieve(), but for a question that is already embedded."""
+    if collection.count() == 0:
+        return []
+
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
@@ -447,45 +508,60 @@ def error_status(error: Exception) -> int:
     return 0
 
 
-def generate_with_retry(prompt: str, client: genai.Client) -> Any:
-    """Ask the generation model, retrying while it's overloaded (429 / 5xx)."""
-    for attempt in range(1, GENERATION_RETRIES + 1):
-        try:
-            return client.interactions.create(model=GENERATION_MODEL, input=prompt)
-        except Exception as error:
-            status = error_status(error)
-            if not (status == 429 or status >= 500) or attempt == GENERATION_RETRIES:
-                raise
-            wait_seconds = INITIAL_WAIT_SECONDS * 2 ** (attempt - 1)
-            print(f"  Gemini returned error {status}. Waiting {wait_seconds}s and retrying...")
-            time.sleep(wait_seconds)
+def is_timeout(error: Exception) -> bool:
+    # the SDK's timeout class lives in a private module, so match by name
+    return isinstance(error, TimeoutError) or "Timeout" in type(error).__name__
 
-    raise RuntimeError("Generation failed after all retries.")
+
+def generate(prompt: str, client: genai.Client) -> Any:
+    """Ask the generation model, with one retry for temporary server errors.
+
+    Uses generate_content rather than the interactions API: interactions has
+    hidden SDK retries that sleep for whatever Retry-After the server sends
+    (hours for a daily limit). Rate limits (429) and timeouts are not
+    retried here - waiting a few seconds wouldn't fix either.
+    """
+    config = types.GenerateContentConfig(
+        http_options=types.HttpOptions(timeout=GENERATION_TIMEOUT_SECONDS * 1000),
+    )
+    for attempt in (1, 2):
+        try:
+            return client.models.generate_content(
+                model=GENERATION_MODEL,
+                contents=prompt,
+                config=config,
+            )
+        except Exception as error:
+            if error_status(error) < 500 or attempt == 2:
+                raise
+            print(f"  Gemini returned error {error_status(error)}. Retrying once in 2s...")
+            time.sleep(2)
 
 
 def usage_details(response: Any) -> dict[str, int] | None:
     """Token counts from a Gemini response, in the shape Langfuse expects."""
-    usage = getattr(response, "usage", None)
+    usage = getattr(response, "usage_metadata", None)
     if usage is None:
         return None
     details = {
-        "input": usage.total_input_tokens,
-        "output": usage.total_output_tokens,
-        "total": usage.total_tokens,
+        "input": usage.prompt_token_count,
+        "output": usage.candidates_token_count,
+        "total": usage.total_token_count,
     }
     return {key: value for key, value in details.items() if value is not None}
 
 
-def answer_question(
+def ask(
     question: str,
     collection: chromadb.Collection,
     client: genai.Client,
     langfuse: Langfuse,
 ) -> dict[str, Any]:
-    """Answer one question, tracing each step in Langfuse.
+    """Answer one question, tracing each step in Langfuse. Prints nothing.
 
     Trace: support-question > embed-question > vector-search >
     relevance-check > answer (skipped when the best score < MIN_SCORE).
+    Returns answer, covered, best_score, chunks, trace_id and trace_url.
     """
     with langfuse.start_as_current_observation(
         name="support-question", as_type="span", input=question
@@ -517,7 +593,8 @@ def answer_question(
             name="relevance-check", as_type="guardrail",
             input={"best_score": round(best_score, 4), "min_score": MIN_SCORE},
         ) as step:
-            covered = best_score >= MIN_SCORE
+            # no chunks at all (empty database) is never "covered"
+            covered = bool(top_chunks) and best_score >= MIN_SCORE
             step.update(output={"covered": covered})
 
         if covered:
@@ -526,8 +603,9 @@ def answer_question(
                 name="answer", as_type="generation",
                 model=GENERATION_MODEL, input=prompt,
             ) as step:
-                response = generate_with_retry(prompt, client)
-                answer = response.output_text
+                response = generate(prompt, client)
+                # text is empty if the model returned nothing (e.g. blocked)
+                answer = response.text or "Sorry, no answer was generated. Please try again."
                 step.update(output=answer, usage_details=usage_details(response))
         else:
             answer = NOT_COVERED_MESSAGE
@@ -536,28 +614,49 @@ def answer_question(
             output=answer,
             metadata={"covered": covered, "best_score": round(best_score, 4)},
         )
+        # used later to attach user feedback to this trace
+        trace_id = langfuse.get_current_trace_id()
         try:
             trace_url = langfuse.get_trace_url()
         except Exception:
             # the link needs a call to Langfuse; never fail an answer over it
             trace_url = None
 
+    return {
+        "answer": answer,
+        "covered": covered,
+        "best_score": best_score,
+        "chunks": top_chunks,
+        "trace_id": trace_id,
+        "trace_url": trace_url,
+    }
+
+
+def answer_question(
+    question: str,
+    collection: chromadb.Collection,
+    client: genai.Client,
+    langfuse: Langfuse,
+) -> dict[str, Any]:
+    """Terminal version of ask(): answers and prints the sources and answer."""
+    result = ask(question, collection, client, langfuse)
+
     print("\nRetrieved chunks:")
-    for chunk in top_chunks:
+    for chunk in result["chunks"]:
         print(
             f"- Source: {chunk['source']}, page {chunk['page']}, "
             f"score: {chunk['score']:.4f}\n"
             f"  Text: {chunk['text'][:PREVIEW_CHARS]}..."
         )
 
-    if not covered:
-        print(f"\nBest score {best_score:.3f} is below {MIN_SCORE} - model not called.")
+    if not result["covered"]:
+        print(f"\nBest score {result['best_score']:.3f} is below {MIN_SCORE} - model not called.")
     print("\nAI Answer:")
-    print(answer)
-    if trace_url:
-        print(f"\nTrace: {trace_url}")
+    print(result["answer"])
+    if result["trace_url"]:
+        print(f"\nTrace: {result['trace_url']}")
 
-    return {"answer": answer, "covered": covered, "best_score": best_score, "chunks": top_chunks}
+    return result
 
 
 # --- Main ---

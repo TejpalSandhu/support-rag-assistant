@@ -8,3 +8,5 @@ embedded_chunks.json
 study/
 .vscode/
 Thumbs.db
+.pytest_cache/
+repomix-output.xml
