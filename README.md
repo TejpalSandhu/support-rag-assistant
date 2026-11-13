@@ -1,5 +1,7 @@
 # Support RAG Assistant
 
+[![CI](https://github.com/TejpalSandhu/support-rag-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/TejpalSandhu/support-rag-assistant/actions/workflows/ci.yml)
+
 A customer-support assistant that answers questions about product manuals
 using Retrieval-Augmented Generation (RAG). It's built for the parts of support
 bots that matter in production: **measuring retrieval quality, tuning it with
@@ -125,9 +127,57 @@ curl -L -o pdfs/prusa3d_manual_xl_en.pdf https://www.prusa3d.com/downloads/manua
 | `python evaluate.py` | Retrieval evaluation across chunk settings -> `eval_results.md` |
 | `python choose_threshold.py` | Recommends `MIN_SCORE` -> `threshold_results.md` |
 | `python verify_chroma.py` | Compares Chroma's ranking with brute-force cosine similarity |
+| `uvicorn api:app --reload` | Starts the web API; try it at http://127.0.0.1:8000/docs |
+| `pytest` | Runs the automated tests (needs `pip install -r requirements-dev.txt`) |
+
+### Website (React)
+
+With the API running (`uvicorn api:app --reload`), start the website in a
+second terminal (needs [Node.js](https://nodejs.org) 20+):
+
+```bash
+cd frontend
+npm install
+npm run dev        # open http://localhost:5173
+```
+
+Upload PDFs on the left, ask questions on the right. Answers show which
+passages they came from, and questions the documents don't cover are clearly
+marked instead of guessed. `npm test` runs the website's tests and
+`npm run lint` checks the code.
+
+### Docker (website + API with one command)
+
+With [Docker Desktop](https://www.docker.com/products/docker-desktop/) running:
+
+```bash
+docker compose up --build      # open http://localhost:8080
+docker compose down            # stop
+```
+
+Two containers start: `backend` (FastAPI, Python 3.12) and `frontend` (the
+built React site served by nginx, which forwards `/api` to the backend).
+Settings come from `.env`; your `pdfs/` and `chroma_db/` folders are mounted
+into the backend, so nothing is embedded twice. Set `APP_ACCESS_KEY` before
+putting it anywhere public.
+
+### Web API
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/health` | Is the server up? (no key needed) |
+| `GET /api/documents` | Uploaded PDFs with chunk counts and status |
+| `POST /api/documents` | Upload a PDF; it's indexed in the background |
+| `DELETE /api/documents/{name}` | Remove a PDF and its chunks |
+| `POST /api/ask` | `{"question": "..."}` -> answer, sources, score, trace link |
+
+If `APP_ACCESS_KEY` is set in `.env`, every endpoint except health needs the
+header `X-API-Key: <your key>`. The tests use a fake Gemini client, so they
+are free, fast, and never touch your API quota.
 
 On the Gemini free tier, every embedded text counts toward a limit of
-roughly 100 per minute and 1,000 per day. The code waits out per-minute limits
+roughly 100 per minute and 1,000 per day, and answers are limited to about
+20 per day per model (switch with `GENERATION_MODEL` in `.env`). The code waits out per-minute limits
 using Google's own retry delay, stops cleanly when the daily limit is
 reached, and resumes where it left off on the next run.
 
@@ -135,6 +185,12 @@ reached, and resumes where it left off on the next run.
 
 ```
 rag_assistant.py       the assistant: ingest, embed, store, retrieve, refuse, answer, trace
+api.py                 web API (FastAPI) around rag_assistant.py, with an access key
+tests/                 automated API tests with a fake Gemini client (pytest)
+frontend/              React website: upload PDFs, chat with sources (Vite, Vitest)
+Dockerfile             backend image; frontend/Dockerfile builds the site into nginx
+docker-compose.yml     runs both containers together
+.github/workflows/     CI: tests, lint and Docker builds on every push
 evaluate.py            retrieval evaluation (hit@k, MRR) across chunk settings
 choose_threshold.py    picks the "docs don't cover this" threshold
 verify_chroma.py       checks Chroma's ranking against hand-written cosine similarity
